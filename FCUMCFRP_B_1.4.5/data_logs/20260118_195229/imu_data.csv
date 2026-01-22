@@ -1,0 +1,1 @@
+timestamp_us,ctrl_acc_x,ctrl_acc_y,ctrl_acc_z,ctrl_gyro_x,ctrl_gyro_y,ctrl_gyro_z,ctrl_mag_x,ctrl_mag_y,ctrl_mag_z,mon_acc_x,mon_acc_y,mon_acc_z,mon_gyro_x,mon_gyro_y,mon_gyro_z,mon_mag_x,mon_mag_y,mon_mag_z,ctrl_roll,ctrl_pitch,ctrl_yaw,mon_roll,mon_pitch,mon_yaw,err_roll,err_pitch,err_yaw
