@@ -1,8 +1,8 @@
 //FCU Madgwick Control Filter Research Platform
 //Author: Patrick Andrasena T.
 //Project Start: 1/06/2025
-//Last Updated: 1/18/2026
-//Version: B-1.4.5
+//Last Updated: 4/14/2026
+//Version: B-1.4.6
 
 //Project's base: 
 //Arduino/Teensy Flight Controller - dRehmFlight
@@ -10,7 +10,7 @@
 //Project Start: 1/6/2020
 //Last Updated: 7/29/2022
 //Version: Beta 1.3
- 
+
 //========================================================================================================================//
 
 //CREDITS + SPECIAL THANKS
@@ -44,6 +44,8 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 #include <Wire.h>     //I2c communication
 #include <SPI.h>      //SPI communication
 #include <PWMServo.h> //Commanding any extra actuators, installed with teensyduino installer
+#include <Ethernet.h>  //Ethernet library for W5500
+#include <EthernetUdp.h> //UDP library for telemetry
 
 #if defined USE_SBUS_RX
   #include "src/SBUS/SBUS.h"   //sBus interface
@@ -55,6 +57,10 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 
 #if defined USE_DSM_RX
   #include "src/DSMRX/DSMRX.h"  
+#endif
+
+#if defined USE_IBUS_RX
+  #include "src/iBus/iBus.h"
 #endif
 
 // Primary IMU selection (for control loop)
@@ -78,7 +84,7 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
   // Wire1 is available from Wire.h on Teensy 4.0 (no separate Wire1.h needed)
   // Uses Wire1 (separate from Wire used by MPU6050) with I2C address 0x69
   // Wire1 clock speed set to 400kHz in monitorIMUinit() (separate from Wire at 1000kHz)
-  MPU9250 mpu9250_monitor(Wire1, 0x69);
+  // MPU9250 monitor object is declared in imuMonitor.ino to avoid redefinition
 #endif
 
 //========================================================================================================================//
@@ -176,7 +182,30 @@ float B_accel = 0.14;     //Accelerometer LP filter paramter, (MPU6050 default: 
 float B_gyro = 0.1;       //Gyro LP filter paramter, (MPU6050 default: 0.1. MPU9250 default: 0.17)
 float B_mag = 1.0;        //Magnetometer LP filter parameter
 
-//Magnetometer calibration parameters - if using MPU9250, uncomment calibrateMagnetometer() in void setup() to get these values, else just ignore these
+//========================================================================================================================//
+//                                          IMU CALIBRATION PARAMETERS                                                   //
+//========================================================================================================================//
+
+// Main IMU (MPU6050) calibration parameters - calibrate using calculate_IMU_error_main() in void setup()
+// These are used for the primary flight control IMU
+float AccErrorX_main = 0.0;
+float AccErrorY_main = 0.0;
+float AccErrorZ_main = 0.0;
+float GyroErrorX_main = 0.0;
+float GyroErrorY_main = 0.0;
+float GyroErrorZ_main = 0.0;
+
+// Monitor IMU (MPU9250) calibration parameters - calibrate using calculate_IMU_error_monitor() in void setup()
+// These are used for the independent validation/monitor IMU
+float AccErrorX_mon = 0.0;
+float AccErrorY_mon = 0.0;
+float AccErrorZ_mon = 0.0;
+float GyroErrorX_mon = 0.0;
+float GyroErrorY_mon = 0.0;
+float GyroErrorZ_mon = 0.0;
+
+// Magnetometer calibration parameters - if using MPU9250, uncomment calibrateMagnetometer() in void setup() to get these values
+// These are shared between main and monitor IMUs if both use MPU9250, otherwise only used by MPU9250
 float MagErrorX = 0.0;
 float MagErrorY = 0.0; 
 float MagErrorZ = 0.0;
@@ -184,7 +213,8 @@ float MagScaleX = 1.0;
 float MagScaleY = 1.0;
 float MagScaleZ = 1.0;
 
-//IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
+// Legacy calibration parameters (deprecated - kept for backward compatibility)
+// NOTE: These are no longer used. Use the _main and _mon versions above instead.
 float AccErrorX = 0.0;
 float AccErrorY = 0.0;
 float AccErrorZ = 0.0;
@@ -272,6 +302,14 @@ unsigned long channel_1_pwm_prev, channel_2_pwm_prev, channel_3_pwm_prev, channe
   bool sbusLostFrame;
 #endif
 
+#if defined USE_IBUS_RX
+  // ibus object, ibusChannels, ibusFailSafe, ibusLostFrame declared in radioComm.ino
+  extern IBUS ibus;
+  extern uint16_t ibusChannels[14];
+  extern bool ibusFailSafe;
+  extern bool ibusLostFrame;
+#endif
+
 #if defined USE_DSM_RX
   DSM1024 DSM;
 #endif
@@ -304,6 +342,20 @@ float roll_error_mon, pitch_error_mon, yaw_error_mon;
 float roll_IMU_mon, pitch_IMU_mon, yaw_IMU_mon;
 // Separate quaternion state for monitor IMU Madgwick filter (always used for UDP telemetry)
 float q0_mon = 1.0f, q1_mon = 0.0f, q2_mon = 0.0f, q3_mon = 0.0f;
+#endif
+
+// Ethernet and UDP variables (declared in imuMonitor.ino)
+extern EthernetUDP Udp;
+extern byte mac[];
+extern unsigned long lastUdpSend;
+
+// Raw PPM channel variables (declared in radioComm.ino)
+extern volatile unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw, channel_6_raw;
+extern volatile unsigned long ppm_isr_count; // Debug counter
+
+// Monitor IMU object declaration (declared in imuMonitor.ino)
+#if defined USE_MPU9250_MONITOR_I2C
+  extern MPU9250 mpu9250_monitor;
 #endif
 
 //Normalized desired state:
@@ -340,12 +392,205 @@ PWMServo motor6_esc;
 bool armedFly = false;
 
 //========================================================================================================================//
+//                                           FUNCTION DECLARATIONS                                                        //                           
+//========================================================================================================================//
+
+// Radio communication functions
+void radioSetup();
+unsigned long getRadioPWM(int channel);
+void togglePPMDebug();
+
+// Monitor IMU functions
+void monitorIMUinit();
+void getIMUdataMonitor();
+void MadgwickMonitor(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz, float invSampleFreq);
+void compareAttitude();
+void sendIMUDataUDP();
+
+//========================================================================================================================//
 //                                                      VOID SETUP                                                        //                           
 //========================================================================================================================//
 
 void setup() {
   Serial.begin(500000); //USB serial
   delay(500);
+
+// ============================================================
+// FLEXPWM FULL RESET BLOCK — Teensy 4.0 (IMXRT1062)
+// Place this at the VERY TOP of setup(), before Serial.begin()
+// and before any pinMode() calls.
+//
+// WHY THIS IS NEEDED:
+// FlexPWM peripheral registers on the RT1062 survive soft resets
+// and USB reflash. Any previous firmware that used FlexPWM output
+// (PWMServo, analogWrite) or capture (PWM passthrough) leaves the
+// submodule running and the IOMUXC pad mux pointed at FlexPWM
+// instead of GPIO. A normal pinMode() only sets the GPIO mux —
+// it does NOT stop the FlexPWM submodule clock that is still
+// sampling or driving the pin underneath.
+//
+// This block explicitly:
+//   1. Stops all 4 submodules of all 4 FlexPWM modules (MCTRL)
+//   2. Clears all control and value registers for each submodule
+//   3. Forces every affected pin's IOMUXC mux back to ALT5 (GPIO)
+//   4. Sets all those pins to INPUT before any other code runs
+//
+// IOMUXC ALT values for Teensy 4.0 pins:
+//   ALT1 = FlexPWM   ALT5 = GPIO
+//
+// Pin-to-IOMUXC register mapping (from IMXRT1062 datasheet):
+//   Pin  0 = GPIO_AD_B0_03  Pin  1 = GPIO_AD_B0_02
+//   Pin  2 = GPIO_EMC_04    Pin  3 = GPIO_EMC_05
+//   Pin  4 = GPIO_EMC_06    Pin  5 = GPIO_EMC_08
+//   Pin  6 = GPIO_B0_10     Pin  7 = GPIO_B1_01
+//   Pin  8 = GPIO_B1_00     Pin  9 = GPIO_B0_11
+//   Pin 15 = GPIO_AD_B1_03  Pin 16 = GPIO_AD_B1_07 (Wire1 SDA — skip)
+//   Pin 17 = GPIO_AD_B1_06 (Wire1 SCL — skip)
+//   Pin 20 = GPIO_AD_B1_10  Pin 21 = GPIO_AD_B1_11
+//   Pin 22 = GPIO_AD_B1_08  Pin 23 = GPIO_AD_B1_09  ← PPM pin
+// ============================================================
+
+// ── Step 1: Stop all FlexPWM submodules ──────────────────────
+// MCTRL LDOK + RUN bits: clear RUN for all 4 SMs in each module
+// FLEXPWM_MCTRL_RUN(n) sets bit n in the RUN field (bits 0-3)
+FLEXPWM1_MCTRL = 0;   // stop all SM0-3 of FlexPWM1
+FLEXPWM2_MCTRL = 0;   // stop all SM0-3 of FlexPWM2
+FLEXPWM3_MCTRL = 0;   // stop all SM0-3 of FlexPWM3
+FLEXPWM4_MCTRL = 0;   // stop all SM0-3 of FlexPWM4
+
+// ── Step 2: Clear all submodule control/value registers ──────
+// FlexPWM1 — SM0 (pins 4, 33), SM1 (pins 8, 7), SM2 (pins 24, 25), SM3 (NC)
+FLEXPWM1_SM0CTRL2 = 0; FLEXPWM1_SM0CTRL = 0;
+FLEXPWM1_SM0VAL0  = 0; FLEXPWM1_SM0VAL1 = 0;
+FLEXPWM1_SM0VAL2  = 0; FLEXPWM1_SM0VAL3 = 0;
+FLEXPWM1_SM0VAL4  = 0; FLEXPWM1_SM0VAL5 = 0;
+
+FLEXPWM1_SM1CTRL2 = 0; FLEXPWM1_SM1CTRL = 0;
+FLEXPWM1_SM1VAL0  = 0; FLEXPWM1_SM1VAL1 = 0;
+FLEXPWM1_SM1VAL2  = 0; FLEXPWM1_SM1VAL3 = 0;
+FLEXPWM1_SM1VAL4  = 0; FLEXPWM1_SM1VAL5 = 0;
+
+FLEXPWM1_SM2CTRL2 = 0; FLEXPWM1_SM2CTRL = 0;
+FLEXPWM1_SM2VAL0  = 0; FLEXPWM1_SM2VAL1 = 0;
+FLEXPWM1_SM2VAL2  = 0; FLEXPWM1_SM2VAL3 = 0;
+FLEXPWM1_SM2VAL4  = 0; FLEXPWM1_SM2VAL5 = 0;
+
+FLEXPWM1_SM3CTRL2 = 0; FLEXPWM1_SM3CTRL = 0;
+FLEXPWM1_SM3VAL0  = 0; FLEXPWM1_SM3VAL1 = 0;
+FLEXPWM1_SM3VAL2  = 0; FLEXPWM1_SM3VAL3 = 0;
+FLEXPWM1_SM3VAL4  = 0; FLEXPWM1_SM3VAL5 = 0;
+
+// FlexPWM2 — SM0 (pins 6, 9), SM1 (pin 35), SM2 (pins 26, 27), SM3 (NC)
+FLEXPWM2_SM0CTRL2 = 0; FLEXPWM2_SM0CTRL = 0;
+FLEXPWM2_SM0VAL0  = 0; FLEXPWM2_SM0VAL1 = 0;
+FLEXPWM2_SM0VAL2  = 0; FLEXPWM2_SM0VAL3 = 0;
+FLEXPWM2_SM0VAL4  = 0; FLEXPWM2_SM0VAL5 = 0;
+
+FLEXPWM2_SM1CTRL2 = 0; FLEXPWM2_SM1CTRL = 0;
+FLEXPWM2_SM1VAL0  = 0; FLEXPWM2_SM1VAL1 = 0;
+FLEXPWM2_SM1VAL2  = 0; FLEXPWM2_SM1VAL3 = 0;
+FLEXPWM2_SM1VAL4  = 0; FLEXPWM2_SM1VAL5 = 0;
+
+FLEXPWM2_SM2CTRL2 = 0; FLEXPWM2_SM2CTRL = 0;
+FLEXPWM2_SM2VAL0  = 0; FLEXPWM2_SM2VAL1 = 0;
+FLEXPWM2_SM2VAL2  = 0; FLEXPWM2_SM2VAL3 = 0;
+FLEXPWM2_SM2VAL4  = 0; FLEXPWM2_SM2VAL5 = 0;
+
+FLEXPWM2_SM3CTRL2 = 0; FLEXPWM2_SM3CTRL = 0;
+FLEXPWM2_SM3VAL0  = 0; FLEXPWM2_SM3VAL1 = 0;
+FLEXPWM2_SM3VAL2  = 0; FLEXPWM2_SM3VAL3 = 0;
+FLEXPWM2_SM3VAL4  = 0; FLEXPWM2_SM3VAL5 = 0;
+
+// FlexPWM3 — SM0 (pin 38), SM1 (pin 28), SM2, SM3
+FLEXPWM3_SM0CTRL2 = 0; FLEXPWM3_SM0CTRL = 0;
+FLEXPWM3_SM0VAL0  = 0; FLEXPWM3_SM0VAL1 = 0;
+FLEXPWM3_SM0VAL2  = 0; FLEXPWM3_SM0VAL3 = 0;
+FLEXPWM3_SM0VAL4  = 0; FLEXPWM3_SM0VAL5 = 0;
+
+FLEXPWM3_SM1CTRL2 = 0; FLEXPWM3_SM1CTRL = 0;
+FLEXPWM3_SM1VAL0  = 0; FLEXPWM3_SM1VAL1 = 0;
+FLEXPWM3_SM1VAL2  = 0; FLEXPWM3_SM1VAL3 = 0;
+FLEXPWM3_SM1VAL4  = 0; FLEXPWM3_SM1VAL5 = 0;
+
+FLEXPWM3_SM2CTRL2 = 0; FLEXPWM3_SM2CTRL = 0;
+FLEXPWM3_SM2VAL0  = 0; FLEXPWM3_SM2VAL1 = 0;
+FLEXPWM3_SM2VAL2  = 0; FLEXPWM3_SM2VAL3 = 0;
+FLEXPWM3_SM2VAL4  = 0; FLEXPWM3_SM2VAL5 = 0;
+
+FLEXPWM3_SM3CTRL2 = 0; FLEXPWM3_SM3CTRL = 0;
+FLEXPWM3_SM3VAL0  = 0; FLEXPWM3_SM3VAL1 = 0;
+FLEXPWM3_SM3VAL2  = 0; FLEXPWM3_SM3VAL3 = 0;
+FLEXPWM3_SM3VAL4  = 0; FLEXPWM3_SM3VAL5 = 0;
+
+// FlexPWM4 — SM0 (pin 22 A, pin 23 B ← PPM), SM1, SM2, SM3
+FLEXPWM4_SM0CTRL2 = 0; FLEXPWM4_SM0CTRL = 0;
+FLEXPWM4_SM0VAL0  = 0; FLEXPWM4_SM0VAL1 = 0;
+FLEXPWM4_SM0VAL2  = 0; FLEXPWM4_SM0VAL3 = 0;
+FLEXPWM4_SM0VAL4  = 0; FLEXPWM4_SM0VAL5 = 0;
+
+FLEXPWM4_SM1CTRL2 = 0; FLEXPWM4_SM1CTRL = 0;
+FLEXPWM4_SM1VAL0  = 0; FLEXPWM4_SM1VAL1 = 0;
+FLEXPWM4_SM1VAL2  = 0; FLEXPWM4_SM1VAL3 = 0;
+FLEXPWM4_SM1VAL4  = 0; FLEXPWM4_SM1VAL5 = 0;
+
+FLEXPWM4_SM2CTRL2 = 0; FLEXPWM4_SM2CTRL = 0;
+FLEXPWM4_SM2VAL0  = 0; FLEXPWM4_SM2VAL1 = 0;
+FLEXPWM4_SM2VAL2  = 0; FLEXPWM4_SM2VAL3 = 0;
+FLEXPWM4_SM2VAL4  = 0; FLEXPWM4_SM2VAL5 = 0;
+
+FLEXPWM4_SM3CTRL2 = 0; FLEXPWM4_SM3CTRL = 0;
+FLEXPWM4_SM3VAL0  = 0; FLEXPWM4_SM3VAL1 = 0;
+FLEXPWM4_SM3VAL2  = 0; FLEXPWM4_SM3VAL3 = 0;
+FLEXPWM4_SM3VAL4  = 0; FLEXPWM4_SM3VAL5 = 0;
+
+// ── Step 3: Force IOMUXC pad mux to ALT5 (GPIO) for all affected pins ──
+// Motor output pins (pins 0-5)
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_03 = 5; // pin 0  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_02 = 5; // pin 1  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_04   = 5; // pin 2  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_05   = 5; // pin 3  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_06   = 5; // pin 4  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_08   = 5; // pin 5  → GPIO
+
+// Wire1 pins (16=SDA1, 17=SCL1) — both are FlexPWM2 SM2
+// Safe to reset to GPIO here because Wire1.begin() in monitorIMUinit()
+// will correctly re-mux them to ALT2 (I2C) when called later in setup().
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_07 = 5; // pin 16 → GPIO (Wire1 SDA1)
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_06 = 5; // pin 17 → GPIO (Wire1 SCL1)
+pinMode(16, INPUT);
+pinMode(17, INPUT);
+
+// Servo output pins (pins 6-9)
+IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_10    = 5; // pin 6  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_01    = 5; // pin 7  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_00    = 5; // pin 8  → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_11    = 5; // pin 9  → GPIO
+
+// Former PWM passthrough / PPM adjacent pins (pins 15, 20-23)
+// NOTE: pins 16 (SDA1) and 17 (SCL1) are Wire1 I2C — skipped intentionally
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_03 = 5; // pin 15 → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_10 = 5; // pin 20 → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_11 = 5; // pin 21 → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_08 = 5; // pin 22 → GPIO
+IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_09 = 5; // pin 23 → GPIO  ← PPM pin
+
+// ── Step 4: Set all released pins to INPUT ────────────────────
+// Motor/ESC pins set to INPUT temporarily — setup() will reassign them
+// correctly via pinMode(OUTPUT) or PWMServo.attach() immediately after
+// this block.
+pinMode(0,  INPUT); pinMode(1,  INPUT);
+pinMode(2,  INPUT); pinMode(3,  INPUT);
+pinMode(4,  INPUT); pinMode(5,  INPUT);
+pinMode(6,  INPUT); pinMode(7,  INPUT);
+pinMode(8,  INPUT); pinMode(9,  INPUT);
+pinMode(15, INPUT);
+pinMode(20, INPUT); pinMode(21, INPUT);
+pinMode(22, INPUT); pinMode(23, INPUT);
+
+delayMicroseconds(100); // brief settle before any peripheral re-init
+
+// ── End FlexPWM full reset ────────────────────────────────────
+
   //Initialize all pins
   pinMode(13, OUTPUT); //Pin 13 LED blinker on board, do not modify 
 
@@ -395,8 +640,9 @@ void setup() {
 
   delay(5);
 
-  //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
-  //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
+  // Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
+  // calculate_IMU_error_main(); //Calibration parameters printed to serial monitor for MAIN IMU. Paste these in the user specified variables section, then comment this out forever.
+  // calculate_IMU_error_monitor(); //Calibration parameters printed to serial monitor for MONITOR IMU. Paste these in the user specified variables section, then comment this out forever.
 
   //Arm servo channels
   servo1.write(0); //Command servo angle from 0-180 degrees (1000 to 2000 PWM)
@@ -438,10 +684,165 @@ void setup() {
   //If using MPU9250 IMU, uncomment for one-time magnetometer calibration (may need to repeat for new locations)
   //calibrateMagnetometer(); //Generates magentometer error and scale factors to be pasted in user-specified variables section
 
+  // ============================================================
+// PPM HARDWARE DIAGNOSTIC — paste into setup() temporarily
+// ============================================================
+//
+// Also temporarily comment out failSafe() in loop() so it does
+// not mask raw values:
+//   // failSafe();
+//
+// What each section tells you:
+//
+// SECTION A — ISR fire count
+//   If ppm_isr_count == 0 after 3 seconds: the signal is NOT
+//   reaching pin 23. Check wiring, receiver power, and signal
+//   polarity. The ISR is dead.
+//
+//   If ppm_isr_count > 0: pin 23 is seeing edges. Proceed to B.
+//
+// SECTION B — Raw pulse timings (blocking, 3 second window)
+//   Shows every rising-edge interval in microseconds for 3 s.
+//   What to look for:
+//     - Long gaps >2500 µs  → these are sync gaps (end of frame)
+//     - Values 1000–2000 µs → these are channel pulses (good)
+//     - All values <500 µs  → signal is inverted PPM; use INPUT_PULLDOWN
+//     - No output at all    → ISR not firing (wiring/power issue)
+//     - Only one value repeating → possibly a single PWM channel,
+//                                   not a PPM stream
+//
+// SECTION C — channel_N_raw snapshot
+//   Shows what the ISR decoded after 3 seconds of signal.
+//   If still all 0: decoding logic is broken despite signal arriving.
+//   If non-zero: decoding works but failSafe() is overwriting them
+//   in loop() — confirm by checking the values are in 700–2300 range.
+//
+// ============================================================
+
+//   extern volatile unsigned long ppm_isr_count;
+//   extern volatile unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw, channel_6_raw;
+
+//   Serial.println(F("=== PPM HARDWARE DIAGNOSTIC START ==="));
+//   Serial.println(F("Waiting 3 seconds for PPM signal..."));
+
+//   // ── SECTION A: ISR fire count ──
+//   unsigned long count_before = ppm_isr_count;
+//   delay(3000);
+//   unsigned long count_after = ppm_isr_count;
+//   unsigned long fires = count_after - count_before;
+
+//   Serial.print(F("ISR fires in 3s: "));
+//   Serial.println(fires);
+
+//   if (fires == 0) {
+//     Serial.println(F("*** NO SIGNAL: ISR never fired. Check:"));
+//     Serial.println(F("    1. Receiver powered and bound to TX"));
+//     Serial.println(F("    2. PPM wire connected to pin 23"));
+//     Serial.println(F("    3. Signal polarity (try INPUT_PULLDOWN if inverted PPM)"));
+//     Serial.println(F("=== DIAGNOSTIC END ==="));
+//     // Halt here so output is readable — comment out while(1) to continue booting
+//     while(1) { digitalWrite(13, !digitalRead(13)); delay(200); }
+//   }
+
+//   // Expected ~600 edges/sec for 6ch PPM at 50Hz (12 edges/frame * 50 frames/sec)
+//   Serial.print(F("Expected ~600 edges/sec, got: "));
+//   Serial.print(fires / 3);
+//   Serial.println(F("/sec"));
+
+//   // ── SECTION B: Raw pulse timing capture ──
+//   Serial.println(F("--- Raw rising-edge intervals (3 second window) ---"));
+
+//   // Temporary ISR that just records raw intervals — bypasses all channel logic
+//   static volatile unsigned long raw_log[120];
+//   static volatile int raw_log_idx = 0;
+//   raw_log_idx = 0;
+
+//   // Inline lambda cannot attach to ISR on Teensy; use a flag + poll approach
+//   // unsigned long diag_start = micros(); deleted due to aren;t recognized by the setup() due to defined in radioComm.ino inside USE_PPM_RX
+//   unsigned long last_edge = 0;
+//   int logged = 0;
+
+//   // Briefly detach normal ISR and do direct polling for 1 second
+//   detachInterrupt(digitalPinToInterrupt(PPM_Pin));
+//   unsigned long poll_end = micros() + 1000000UL; // 1 second
+
+//   while (micros() < poll_end && logged < 120) {
+//     // Wait for rising edge
+//     while (digitalRead(PPM_Pin) == LOW && micros() < poll_end);
+//     unsigned long t = micros();
+//     if (last_edge != 0) {
+//       raw_log[logged++] = t - last_edge;
+//     }
+//     last_edge = t;
+//     // Wait for falling edge before next rising
+//     while (digitalRead(PPM_Pin) == HIGH && micros() < poll_end);
+//   }
+
+//   // Re-attach normal ISR
+//   extern void getPPM();  // forward declaration — defined in radioComm.ino
+//   attachInterrupt(digitalPinToInterrupt(PPM_Pin), getPPM, CHANGE);
+
+//   Serial.print(F("Captured "));
+//   Serial.print(logged);
+//   Serial.println(F(" intervals:"));
+
+//   unsigned long min_val = 0xFFFFFFFF, max_val = 0;
+//   int sync_count = 0, ch_count = 0;
+
+//   for (int i = 0; i < logged; i++) {
+//     unsigned long v = raw_log[i];
+//     if (v < min_val) min_val = v;
+//     if (v > max_val) max_val = v;
+//     if (v >= 2500) sync_count++;
+//     else if (v >= 700 && v <= 2300) ch_count++;
+
+//     Serial.print(v);
+//     Serial.print(F(" µs"));
+//     if (v >= 2500)        Serial.print(F(" <-- SYNC"));
+//     else if (v < 500)     Serial.print(F(" <-- SHORT (inverted PPM?)"));
+//     Serial.println();
+//   }
+
+//   Serial.print(F("Min: ")); Serial.print(min_val); Serial.println(F(" µs"));
+//   Serial.print(F("Max: ")); Serial.print(max_val); Serial.println(F(" µs"));
+//   Serial.print(F("Sync gaps found: ")); Serial.println(sync_count);
+//   Serial.print(F("Channel pulses found: ")); Serial.println(ch_count);
+
+//   if (min_val < 500 && max_val < 1000) {
+//     Serial.println(F("*** Signal looks INVERTED. Change pinMode(PPM_Pin, INPUT_PULLDOWN)"));
+//     Serial.println(F("    and flip ISR edge from HIGH->LOW to LOW->HIGH detection."));
+//   } else if (sync_count == 0) {
+//     Serial.println(F("*** No sync gaps found. Either not a PPM stream, or"));
+//     Serial.println(F("    PPM_SYNC_MIN_US threshold needs lowering in quad.h."));
+//     Serial.println(F("    Try: #define PPM_SYNC_MIN_US 2200UL"));
+//   } else {
+//     Serial.println(F("Signal looks like valid PPM."));
+//   }
+
+//   // ── SECTION C: Decoded channel snapshot ──
+//   delay(500); // Let ISR run for a moment
+//   Serial.println(F("--- Decoded channel_N_raw after ISR runs ---"));
+//   Serial.print(F("CH1: ")); Serial.println(channel_1_raw);
+//   Serial.print(F("CH2: ")); Serial.println(channel_2_raw);
+//   Serial.print(F("CH3: ")); Serial.println(channel_3_raw);
+//   Serial.print(F("CH4: ")); Serial.println(channel_4_raw);
+//   Serial.print(F("CH5: ")); Serial.println(channel_5_raw);
+//   Serial.print(F("CH6: ")); Serial.println(channel_6_raw);
+
+//   if (channel_1_raw == 0 && channel_2_raw == 0) {
+//     Serial.println(F("*** All channels still 0. Sync threshold or channel window mismatch."));
+//     Serial.println(F("    Check the raw intervals above against PPM_SYNC_MIN_US / PPM_CH_MIN_US."));
+//   } else {
+//     Serial.println(F("Channels decoded OK. If loop() still shows failsafe values,"));
+//     Serial.println(F("failSafe() is overwriting them — check channel range vs minVal=800."));
+//   }
+
+//   Serial.println(F("=== PPM HARDWARE DIAGNOSTIC END ==="));
+// ============================================================
+// END DIAGNOSTIC BLOCK
+// ============================================================ 
+
 }
-
-
-
 //========================================================================================================================//
 //                                                       MAIN LOOP                                                        //                           
 //========================================================================================================================//
@@ -455,17 +856,21 @@ void loop() {
   loopBlink(); //Indicate we are in main loop with short blink every 1.5 seconds
 
   //Print data at 100hz (uncomment one at a time for troubleshooting) - SELECT ONE:
-  //printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
+  printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
   //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
   //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
   //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
-  //printMagData();       //Prints filtered magnetometer data direct from IMU (expected: ~ -300 to 300)
-  //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
+  //printMagData();       //Prints filtered magnetometer data direct from IMU (expected: ~ -400 to 400)
+  //printLoopRate();      //Prints time between loops (expected: 500 microseconds = 2000Hz)
+  // debugPPMSignal();     //Serial Plotter: PPM channels + signal quality (Tools > Serial Plotter)
+  // debugRawPPMTiming();  //Debug raw PPM pulse timing (uncomment to see transmitter order)
+  // togglePPMDebug();     //Toggle PPM ISR verbose debug output
   //printAttitudeComparison(); //Prints attitude comparison (requires USE_MPU9250_MONITOR_I2C + USE_MONITOR_ATTITUDE_COMPARISON)
   //printRawSensorComparison(); //Prints raw sensor comparison (requires USE_MPU9250_MONITOR_I2C, no attitude comparison)
   //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
   //printMotorCommands(); //Prints the values being written to the motors (expected: 120 to 250)
   //printServoCommands(); //Prints the values being written to the servos (expected: 0 to 180)
+  //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
   //printLoopRate();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
 
   // Get arming status
@@ -571,10 +976,34 @@ void controlMixer() {
    */
    
   //Quad mixing - EXAMPLE
-  m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front Left
-  m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front Right
-  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
-  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
+  /* for easier motor placement setup, make sure to fit and reference
+  *the position of the propellers from the top of the vehicle, facing forward
+  *and adjust the motor direction accordingly by their ESCs.
+  *Props in (rotation cancels inward instead of outward) is preferrable for default mix
+  *additionally might improve circulation cooling on open circuit assembly
+  */
+  
+  /* ========================================
+* FUNDAMENTAL PHYSICS OF QUAD MIXING
+   ========================================
+* Control Axis    | M1(FL) | M2(FR) | M3(BR) | M4(BL) | Physical Effect
+   ================|========|========|========|========|=================
+* Throttle (+)    |   +    |   +    |   +    |   +    | Total thrust increase
+* Pitch (-)       |   +    |   +    |   -    |   -    | Nose down (forward)
+* Pitch (+)       |   -    |   -    |   +    |   +    | Nose up (backward)
+* Roll (+)        |   +    |   -    |   -    |   +    | Roll right
+* Roll (-)        |   -    |   +    |   +    |   -    | Roll left
+* Yaw (+)         |   +    |   -    |   +    |   -    | Yaw right (CW)
+* Yaw (-)         |   -    |   +    |   -    |   +    | Yaw left (CCW)
+   ========================================
+* Physics Principle: Each control axis creates differential thrust
+* to generate desired moments while maintaining total thrust balance
+   ========================================
+  */
+  m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front Left (CW)
+  m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front Right (CCW)
+  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right (CW)
+  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left (CCW)
   m5_command_scaled = 0;
   m6_command_scaled = 0;
 
@@ -672,10 +1101,10 @@ void getIMUdata() {
   AccX = AcX / ACCEL_SCALE_FACTOR; //G's
   AccY = AcY / ACCEL_SCALE_FACTOR;
   AccZ = AcZ / ACCEL_SCALE_FACTOR;
-  //Correct the outputs with the calculated error values
-  AccX = AccX - AccErrorX;
-  AccY = AccY - AccErrorY;
-  AccZ = AccZ - AccErrorZ;
+  //Correct the outputs with the calculated error values for MAIN IMU
+  AccX = AccX - AccErrorX_main;
+  AccY = AccY - AccErrorY_main;
+  AccZ = AccZ - AccErrorZ_main;
   //LP filter accelerometer data
   AccX = (1.0 - B_accel)*AccX_prev + B_accel*AccX;
   AccY = (1.0 - B_accel)*AccY_prev + B_accel*AccY;
@@ -688,10 +1117,10 @@ void getIMUdata() {
   GyroX = GyX / GYRO_SCALE_FACTOR; //deg/sec
   GyroY = GyY / GYRO_SCALE_FACTOR;
   GyroZ = GyZ / GYRO_SCALE_FACTOR;
-  //Correct the outputs with the calculated error values
-  GyroX = GyroX - GyroErrorX;
-  GyroY = GyroY - GyroErrorY;
-  GyroZ = GyroZ - GyroErrorZ;
+  //Correct the outputs with the calculated error values for MAIN IMU
+  GyroX = GyroX - GyroErrorX_main;
+  GyroY = GyroY - GyroErrorY_main;
+  GyroZ = GyroZ - GyroErrorZ_main;
   //LP filter gyro data
   GyroX = (1.0 - B_gyro)*GyroX_prev + B_gyro*GyroX;
   GyroY = (1.0 - B_gyro)*GyroY_prev + B_gyro*GyroY;
@@ -725,23 +1154,23 @@ void getIMUdata() {
 }
 
 
-void calculate_IMU_error() {
-  //DESCRIPTION: Computes IMU accelerometer and gyro error on startup. Note: vehicle should be powered up on flat surface
+void calculate_IMU_error_main() {
+  //DESCRIPTION: Computes MAIN IMU (MPU6050/MPU9250) accelerometer and gyro error on startup. Note: vehicle should be powered up on flat surface
   /*
    * Don't worry too much about what this is doing. The error values it computes are applied to the raw gyro and 
-   * accelerometer values AccX, AccY, AccZ, GyroX, GyroY, GyroZ in getIMUdata(). This eliminates drift in the
-   * measurement. 
+   * accelerometer values so that the gyro angles are correct when the vehicle is not moving. This is 
+   * part of the calibration process for the MAIN IMU used for flight control.
    */
   int16_t AcX,AcY,AcZ,GyX,GyY,GyZ;
   #if defined USE_MPU9250_SPI
     int16_t MgX,MgY,MgZ;
   #endif
-  AccErrorX = 0.0;
-  AccErrorY = 0.0;
-  AccErrorZ = 0.0;
-  GyroErrorX = 0.0;
-  GyroErrorY= 0.0;
-  GyroErrorZ = 0.0;
+  AccErrorX_main = 0.0;
+  AccErrorY_main = 0.0;
+  AccErrorZ_main = 0.0;
+  GyroErrorX_main = 0.0;
+  GyroErrorY_main= 0.0;
+  GyroErrorZ_main = 0.0;
   
   //Read IMU values 12000 times
   int c = 0;
@@ -759,44 +1188,137 @@ void calculate_IMU_error() {
     GyroY = GyY / GYRO_SCALE_FACTOR;
     GyroZ = GyZ / GYRO_SCALE_FACTOR;
     
-    //Sum all readings
-    AccErrorX  = AccErrorX + AccX;
-    AccErrorY  = AccErrorY + AccY;
-    AccErrorZ  = AccErrorZ + AccZ;
-    GyroErrorX = GyroErrorX + GyroX;
-    GyroErrorY = GyroErrorY + GyroY;
-    GyroErrorZ = GyroErrorZ + GyroZ;
+    //Sum all readings for MAIN IMU
+    AccErrorX_main  = AccErrorX_main + AccX;
+    AccErrorY_main  = AccErrorY_main + AccY;
+    AccErrorZ_main  = AccErrorZ_main + AccZ;
+    GyroErrorX_main = GyroErrorX_main + GyroX;
+    GyroErrorY_main = GyroErrorY_main + GyroY;
+    GyroErrorZ_main = GyroErrorZ_main + GyroZ;
     c++;
   }
-  //Divide the sum by 12000 to get the error value
-  AccErrorX  = AccErrorX / c;
-  AccErrorY  = AccErrorY / c;
-  AccErrorZ  = AccErrorZ / c - 1.0;
-  GyroErrorX = GyroErrorX / c;
-  GyroErrorY = GyroErrorY / c;
-  GyroErrorZ = GyroErrorZ / c;
+  //Divide the sum by 12000 to get the error value for MAIN IMU
+  AccErrorX_main  = AccErrorX_main / c;
+  AccErrorY_main  = AccErrorY_main / c;
+  AccErrorZ_main  = AccErrorZ_main / c - 1.0;
+  GyroErrorX_main = GyroErrorX_main / c;
+  GyroErrorY_main = GyroErrorY_main / c;
+  GyroErrorZ_main = GyroErrorZ_main / c;
 
-  Serial.print("float AccErrorX = ");
-  Serial.print(AccErrorX);
+  Serial.println("MAIN IMU Calibration Parameters:");
+  Serial.print("float AccErrorX_main = ");
+  Serial.print(AccErrorX_main);
   Serial.println(";");
-  Serial.print("float AccErrorY = ");
-  Serial.print(AccErrorY);
+  Serial.print("float AccErrorY_main = ");
+  Serial.print(AccErrorY_main);
   Serial.println(";");
-  Serial.print("float AccErrorZ = ");
-  Serial.print(AccErrorZ);
+  Serial.print("float AccErrorZ_main = ");
+  Serial.print(AccErrorZ_main);
   Serial.println(";");
   
-  Serial.print("float GyroErrorX = ");
-  Serial.print(GyroErrorX);
+  Serial.print("float GyroErrorX_main = ");
+  Serial.print(GyroErrorX_main);
   Serial.println(";");
-  Serial.print("float GyroErrorY = ");
-  Serial.print(GyroErrorY);
+  Serial.print("float GyroErrorY_main = ");
+  Serial.print(GyroErrorY_main);
   Serial.println(";");
-  Serial.print("float GyroErrorZ = ");
-  Serial.print(GyroErrorZ);
+  Serial.print("float GyroErrorZ_main = ");
+  Serial.print(GyroErrorZ_main);
   Serial.println(";");
 
-  Serial.println("Paste these values in user specified variables section and comment out calculate_IMU_error() in void setup.");
+  Serial.println("Paste these values in the MAIN IMU calibration parameters section and comment out calculate_IMU_error_main() in void setup.");
+}
+
+//========================================================================================================================//
+//                                          MONITOR IMU CALIBRATION                                                       //
+//========================================================================================================================//
+
+void calculate_IMU_error_monitor() {
+  //DESCRIPTION: Computes MONITOR IMU (MPU9250) accelerometer and gyro error on startup. Note: vehicle should be powered up on flat surface
+  /*
+   * This function calibrates the independent monitor IMU (MPU9250) used for validation and research purposes.
+   * The error values it computes are applied to the raw gyro and accelerometer values so that the 
+   * monitor IMU provides accurate independent attitude estimates for comparison with the main IMU.
+   * This is part of the calibration process for the MONITOR IMU used for validation.
+   */
+  
+  #if defined USE_MPU9250_MONITOR_I2C
+    int16_t AcX_mon, AcY_mon, AcZ_mon, GyX_mon, GyY_mon, GyZ_mon;
+    
+    AccErrorX_mon = 0.0;
+    AccErrorY_mon = 0.0;
+    AccErrorZ_mon = 0.0;
+    GyroErrorX_mon = 0.0;
+    GyroErrorY_mon = 0.0;
+    GyroErrorZ_mon = 0.0;
+    
+    Serial.println("Starting MONITOR IMU calibration...");
+    Serial.println("Keep vehicle level and still for 10 seconds...");
+    
+    //Read monitor IMU values 10000 times (shorter than main IMU for efficiency)
+    int c = 0;
+    while (c < 10000) {
+      mpu9250_monitor.readSensor();
+      
+      // Get raw accelerometer and gyro data from monitor IMU
+      AcX_mon = mpu9250_monitor.getAccelX_mss() * 1000.0f / 9.807f; // Convert to mg for consistency
+      AcY_mon = mpu9250_monitor.getAccelY_mss() * 1000.0f / 9.807f;
+      AcZ_mon = mpu9250_monitor.getAccelZ_mss() * 1000.0f / 9.807f;
+      GyX_mon = mpu9250_monitor.getGyroX_rads() * 57.29577951f; // Convert to deg/s
+      GyY_mon = mpu9250_monitor.getGyroY_rads() * 57.29577951f;
+      GyZ_mon = mpu9250_monitor.getGyroZ_rads() * 57.29577951f;
+      
+      //Sum all readings for MONITOR IMU
+      AccErrorX_mon  = AccErrorX_mon + AcX_mon;
+      AccErrorY_mon  = AccErrorY_mon + AcY_mon;
+      AccErrorZ_mon  = AccErrorZ_mon + AcZ_mon;
+      GyroErrorX_mon = GyroErrorX_mon + GyX_mon;
+      GyroErrorY_mon = GyroErrorY_mon + GyY_mon;
+      GyroErrorZ_mon = GyroErrorZ_mon + GyZ_mon;
+      c++;
+      
+      if (c % 1000 == 0) {
+        Serial.print(".");
+      }
+    }
+    
+    //Divide the sum by 10000 to get the error value for MONITOR IMU
+    AccErrorX_mon  = AccErrorX_mon / c;
+    AccErrorY_mon  = AccErrorY_mon / c;
+    AccErrorZ_mon  = AccErrorZ_mon / c - 1000.0f; // Subtract 1g (1000mg) for Z axis
+    GyroErrorX_mon = GyroErrorX_mon / c;
+    GyroErrorY_mon = GyroErrorY_mon / c;
+    GyroErrorZ_mon = GyroErrorZ_mon / c;
+
+    Serial.println();
+    Serial.println("MONITOR IMU Calibration Parameters:");
+    Serial.print("float AccErrorX_mon = ");
+    Serial.print(AccErrorX_mon);
+    Serial.println(";");
+    Serial.print("float AccErrorY_mon = ");
+    Serial.print(AccErrorY_mon);
+    Serial.println(";");
+    Serial.print("float AccErrorZ_mon = ");
+    Serial.print(AccErrorZ_mon);
+    Serial.println(";");
+    
+    Serial.print("float GyroErrorX_mon = ");
+    Serial.print(GyroErrorX_mon);
+    Serial.println(";");
+    Serial.print("float GyroErrorY_mon = ");
+    Serial.print(GyroErrorY_mon);
+    Serial.println(";");
+    Serial.print("float GyroErrorZ_mon = ");
+    Serial.print(GyroErrorZ_mon);
+    Serial.println(";");
+
+    Serial.println("Paste these values in the MONITOR IMU calibration parameters section and comment out calculate_IMU_error_monitor() in void setup.");
+    Serial.println("Monitor IMU calibration complete!");
+    
+  #else
+    Serial.println("ERROR: Monitor IMU not enabled. Cannot calibrate monitor IMU.");
+    Serial.println("Enable USE_MPU9250_MONITOR_I2C in quad.h to use monitor IMU calibration.");
+  #endif
 }
 
 void calibrateAttitude() {
@@ -1303,10 +1825,10 @@ void getCommands() {
    * - DSM: DSM_MAP_CH1-6 maps logical channels to physical DSM channel array indices (0-based)
    * The raw radio commands are filtered with a first order low-pass filter to eliminate any really high frequency noise. 
    */
-  unsigned long raw_channels[7] = {0}; // Temporary storage for raw physical channels (index 0 unused, 1-6 used)
 
-  #if defined USE_PPM_RX
-    // PPM: Read physical channels and apply mapping (PPM_MAP_CH1-6 map logical to physical slot numbers)
+   #if defined USE_PPM_RX
+   unsigned long raw_channels[7] = {0}; // Temporary storage for raw physical channels (index 0 unused, 1-6 used)
+   // PPM: Read physical channels and apply mapping (PPM_MAP_CH1-6 map logical to physical slot numbers)
     raw_channels[PPM_MAP_CH1] = getRadioPWM(PPM_MAP_CH1);
     raw_channels[PPM_MAP_CH2] = getRadioPWM(PPM_MAP_CH2);
     raw_channels[PPM_MAP_CH3] = getRadioPWM(PPM_MAP_CH3);
@@ -1406,7 +1928,22 @@ void getCommands() {
         channel_4_pwm = raw_channels[DSM_MAP_CH4];
         channel_5_pwm = raw_channels[DSM_MAP_CH5];
         channel_6_pwm = raw_channels[DSM_MAP_CH6];
+      }
+
+  #elif defined USE_IBUS_RX
+    // i-BUS: read() returns true only when a complete valid frame arrives.
+    // If no new frame this loop iteration, channel values hold from last
+    // valid frame — correct behavior, do not update pwm values.
+    if (ibus.read(ibusChannels, &ibusFailSafe, &ibusLostFrame)) {
+      channel_1_pwm = ibusChannels[IBUS_MAP_CH1 - 1];
+      channel_2_pwm = ibusChannels[IBUS_MAP_CH2 - 1];
+      channel_3_pwm = ibusChannels[IBUS_MAP_CH3 - 1];
+      channel_4_pwm = ibusChannels[IBUS_MAP_CH4 - 1];
+      channel_5_pwm = ibusChannels[IBUS_MAP_CH5 - 1];
+      channel_6_pwm = ibusChannels[IBUS_MAP_CH6 - 1];
     }
+    // ibusFailSafe true → failSafe() will catch out-of-range values
+    // ibusLostFrame true → checksum failed, values not updated (held)
   #endif
   
   //Low-pass the critical commands and update previous values
@@ -1459,7 +1996,6 @@ void failSafe() {
 }
 
 #if defined USE_ONESHOT125_ESC
-
 void commandMotors() {
   //DESCRIPTION: Send pulses to motor pins, oneshot125 protocol
   /*
@@ -1549,7 +2085,7 @@ void calibrateESCs() {
       digitalWrite(13, HIGH); //LED on to indicate we are not in main loop
 
       getCommands(); //Pulls current available radio commands
-      failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
+      // failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
       getDesState(); //Convert raw commands to normalized values based on saturated control limits
       getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
       Madgwick(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, MagY, -MagX, MagZ, dt); //Updates roll_IMU, pitch_IMU, and yaw_IMU (degrees)
@@ -1597,7 +2133,7 @@ void calibrateESCs() {
       motor5_esc.write(map(m5_command_PWM, 1000, 2000, 0, 180));
       motor6_esc.write(map(m6_command_PWM, 1000, 2000, 0, 180));
 
-      //printRadioData(); //Radio pwm values (expected: 1000 to 2000)
+      printRadioData(); //Radio pwm values (expected: 1000 to 2000)
       
       loopRate(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
    }
@@ -1709,20 +2245,30 @@ void throttleCut() {
 }
 
 void calibrateMagnetometer() {
+  //DESCRIPTION: Calibrates magnetometer for MPU9250 (both SPI main IMU and I2C monitor IMU)
+  /*
+   * This function supports magnetometer calibration for:
+   * 1. Main IMU (MPU9250 via SPI) - when USE_MPU9250_SPI is defined
+   * 2. Monitor IMU (MPU9250 via I2C) - when USE_MPU9250_MONITOR_I2C is defined
+   * The calibration process generates bias and scale factors that should be copied
+   * to the magnetometer calibration parameters in the user variables section.
+   */
+  
   #if defined USE_MPU9250_SPI 
+    // Main IMU (SPI) magnetometer calibration
     float success;
-    Serial.println("Beginning magnetometer calibration in");
+    Serial.println("Beginning MAIN IMU (SPI) magnetometer calibration in");
     Serial.println("3...");
     delay(1000);
     Serial.println("2...");
     delay(1000);
     Serial.println("1...");
     delay(1000);
-    Serial.println("Rotate the IMU about all axes until complete.");
+    Serial.println("Rotate the MAIN IMU about all axes until complete.");
     Serial.println(" ");
     success = mpu9250.calibrateMag();
     if(success) {
-      Serial.println("Calibration Successful!");
+      Serial.println("MAIN IMU Calibration Successful!");
       Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
       Serial.print("float MagErrorX = ");
       Serial.print(mpu9250.getMagBiasX_uT());
@@ -1746,13 +2292,61 @@ void calibrateMagnetometer() {
       Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
     }
     else {
-      Serial.println("Calibration Unsuccessful. Please reset the board and try again.");
+      Serial.println("MAIN IMU Calibration Unsuccessful. Please reset the board and try again.");
     }
   
     while(1); //Halt code so it won't enter main loop until this function commented out
+    
+  #elif defined USE_MPU9250_MONITOR_I2C
+    // Monitor IMU (I2C) magnetometer calibration
+    float success;
+    Serial.println("Beginning MONITOR IMU (I2C Wire1) magnetometer calibration in");
+    Serial.println("3...");
+    delay(1000);
+    Serial.println("2...");
+    delay(1000);
+    Serial.println("1...");
+    delay(1000);
+    Serial.println("Rotate the MONITOR IMU about all axes until complete.");
+    Serial.println(" ");
+    success = mpu9250_monitor.calibrateMag();
+    if(success) {
+      Serial.println("MONITOR IMU Calibration Successful!");
+      Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
+      Serial.print("float MagErrorX = ");
+      Serial.print(mpu9250_monitor.getMagBiasX_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorY = ");
+      Serial.print(mpu9250_monitor.getMagBiasY_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorZ = ");
+      Serial.print(mpu9250_monitor.getMagBiasZ_uT());
+      Serial.println(";");
+      Serial.print("float MagScaleX = ");
+      Serial.print(mpu9250_monitor.getMagScaleFactorX());
+      Serial.println(";");
+      Serial.print("float MagScaleY = ");
+      Serial.print(mpu9250_monitor.getMagScaleFactorY());
+      Serial.println(";");
+      Serial.print("float MagScaleZ = ");
+      Serial.print(mpu9250_monitor.getMagScaleFactorZ());
+      Serial.println(";");
+      Serial.println(" ");
+      Serial.println("These magnetometer calibration parameters are shared between main and monitor IMUs if both use MPU9250.");
+      Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
+    }
+    else {
+      Serial.println("MONITOR IMU Calibration Unsuccessful. Please reset the board and try again.");
+    }
+  
+    while(1); //Halt code so it won't enter main loop until this function commented out
+    
+  #else
+    Serial.println("Error: No MPU9250 IMU available for magnetometer calibration.");
+    Serial.println("Enable either USE_MPU9250_SPI (main IMU) or USE_MPU9250_MONITOR_I2C (monitor IMU) in quad.h");
+    Serial.println("Note: MPU6050 does not have a magnetometer, so magnetometer calibration is not applicable.");
+    while(1); //Halt code so it won't enter main loop until this function commented out
   #endif
-  Serial.println("Error: MPU9250 not selected. Cannot calibrate non-existent magnetometer.");
-  while(1); //Halt code so it won't enter main loop until this function commented out
 }
 
 void loopRate(int freq) {
@@ -1775,9 +2369,9 @@ void loopRate(int freq) {
 
 void loopBlink() {
   //DESCRIPTION: Blink LED on board to indicate main loop is running
-  /*
-   * It looks cool.
-   */
+  /* 
+   * It looks cool. 
+   */ 
   if (current_time - blink_counter > blink_delay) {
     blink_counter = micros();
     digitalWrite(13, blinkAlternate); //Pin 13 is built in LED
@@ -1939,6 +2533,134 @@ void printLoopRate() {
     print_counter = micros();
     Serial.print(F("dt:"));
     Serial.println(dt*1000000.0);
+  }
+}
+
+//========================================================================================================================//
+//                                             PPM DEBUGGING FUNCTION                                                      //
+//========================================================================================================================//
+
+void debugPPMSignal() {
+  //DESCRIPTION: Debug radio signal reception - Serial Plotter format
+  /*
+   * Use Arduino IDE Serial Plotter (Tools > Serial Plotter) to visualize:
+   * - CH1-CH6: Channel values (1000-2000)
+   * - Quality: Signal quality indicator (0-100)
+   */
+  static unsigned long last_debug_time = 0;
+  static int signal_quality = 0;
+  
+  // Output every 100ms (10Hz) for smooth plotting
+  if (current_time - last_debug_time > 100000) {
+    
+    #if defined USE_PPM_RX
+    // Check PPM pin state and update signal quality
+    int pin_state = digitalRead(PPM_Pin);
+    if (pin_state == HIGH) {
+      signal_quality = min(signal_quality + 5, 100);  // Increase quality
+    } else {
+      signal_quality = max(signal_quality - 10, 0);   // Decrease quality
+    }
+    #elif defined USE_IBUS_RX
+    // For IBUS, check signal quality based on frame reception
+    if (!ibusLostFrame && !ibusFailSafe) {
+      signal_quality = min(signal_quality + 5, 100);  // Increase quality
+    } else {
+      signal_quality = max(signal_quality - 10, 0);   // Decrease quality
+    }
+    #else
+    // For other receiver types, use a simple signal quality check
+    signal_quality = 90; // Assume good signal for debugging
+    #endif
+    
+    // Serial Plotter format: Label:Value separated by commas
+    Serial.print("CH1:");
+    Serial.print(channel_1_pwm);
+    Serial.print(",CH2:");
+    Serial.print(channel_2_pwm);
+    Serial.print(",CH3:");
+    Serial.print(channel_3_pwm);
+    Serial.print(",CH4:");
+    Serial.print(channel_4_pwm);
+    Serial.print(",CH5:");
+    Serial.print(channel_5_pwm);
+    Serial.print(",CH6:");
+    Serial.print(channel_6_pwm);
+    Serial.print(",Signal:");
+    Serial.print(signal_quality);
+    Serial.print(",PinState:");
+    
+    #if defined USE_PPM_RX
+    Serial.println(pin_state == HIGH ? 100 : 0);
+    #elif defined USE_IBUS_RX
+    Serial.println(!ibusLostFrame && !ibusFailSafe ? 100 : 0);
+    #else
+    Serial.println(90); // Default pin state for other receivers
+    #endif
+    
+    last_debug_time = current_time;
+  }
+}
+
+//=========================================================================================//
+
+//RAW PPM TIMING DEBUG FUNCTION
+
+void debugRawPPMTiming() {
+  //DESCRIPTION: Debug raw PPM pulse timing to see actual transmitter channel order
+  /*
+   * This function shows the raw PPM pulse timing without any mapping.
+   * This helps determine the actual channel order sent by the transmitter.
+   */
+  
+  static unsigned long last_debug_time = 0;
+  static unsigned long last_isr_count = 0;
+  
+  // Only run debug output every 2 seconds to avoid flooding serial
+  if (current_time - last_debug_time > 2000000) {
+    
+    Serial.println("=== RAW PPM TIMING (No Mapping Applied) ===");
+    
+    // Show ISR activity
+    unsigned long current_isr_count = ppm_isr_count;
+    Serial.print("PPM ISR calls: ");
+    Serial.print(current_isr_count);
+    Serial.print(" (");
+    Serial.print(current_isr_count - last_isr_count);
+    Serial.println(" in last 2s)");
+    
+    // Show current raw values
+    Serial.print("PPM Slot 1: ");
+    Serial.print(channel_1_raw);
+    Serial.println(" μs");
+    
+    Serial.print("PPM Slot 2: ");
+    Serial.print(channel_2_raw);
+    Serial.println(" μs");
+    
+    Serial.print("PPM Slot 3: ");
+    Serial.print(channel_3_raw);
+    Serial.println(" μs");
+    
+    Serial.print("PPM Slot 4: ");
+    Serial.print(channel_4_raw);
+    Serial.println(" μs");
+    
+    Serial.print("PPM Slot 5: ");
+    Serial.print(channel_5_raw);
+    Serial.println(" μs");
+    
+    Serial.print("PPM Slot 6: ");
+    Serial.print(channel_6_raw);
+    Serial.println(" μs");
+    
+    Serial.println("\nExpected range: 1000-2000 μs for active channels");
+    Serial.println("Expected ISR calls: ~100 per second (50Hz PPM = 100 edges/sec)");
+    Serial.println("Move each stick individually to see which slot changes!");
+    Serial.println("---");
+    
+    last_isr_count = current_isr_count;
+    last_debug_time = current_time;
   }
 }
 
