@@ -5,6 +5,7 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 ## Overview
 
 `quad.h` is the central configuration file that defines:
+
 - **Receiver Type Selection**: PWM, PPM, SBUS, DSM, IBUS, ELRS support
 - **IMU Configuration**: Primary and secondary IMU selection
 - **Monitor System**: UDP telemetry and validation setup
@@ -12,12 +13,34 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 - **Channel Mapping**: Logical to physical channel assignments
 - **Pin Definitions**: Hardware pin assignments
 - **Safety Checks**: Compile-time configuration validation
+- **PPM Configuration**: Enhanced PPM timing and mapping parameters
+
+## Key Updates in Beta 1.1
+
+### Enhanced PPM Configuration
+
+- **Timing Thresholds**: Configurable PPM sync and channel timing
+- **Channel Mapping**: Flexible logical to physical PPM slot assignment
+- **Compatibility**: Support for various PPM transmitter implementations
+- **Debug Support**: Built-in PPM diagnostic capabilities
+
+### IBUS Integration
+
+- **Serial5 Configuration**: Dedicated IBUS UART port setup
+- **Channel Mapping**: Complete 14-channel IBUS support
+- **Pin Assignment**: Optimized pin configuration for IBUS receivers
+
+### Safety Improvements
+
+- **PWM Passthrough Fix**: Resolved channel conflicts between PPM and PWM
+- **Compilation Guards**: Enhanced error checking for invalid configurations
+- **Pin Conflict Prevention**: Comprehensive pin assignment validation
 
 ## Key Configuration Sections
 
 ### 1. Receiver Type Selection
 
-```cpp
+```cppcpp
 // Select ONE receiver type:
 #define USE_ELRS_RX          // ExpressLRS Radio System
 // #define USE_PWM_RX        // Standard PWM Receiver
@@ -25,9 +48,10 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 // #define USE_SBUS_RX       // SBUS Receiver
 // #define USE_DSM_RX        // DSM Receiver
 // #define USE_IBUS_RX       // IBUS Receiver
-```
+```cpp
 
 **Supported Receivers:**
+
 - **ELRS**: ExpressLTS Radio System (420kHz CRSF protocol)
 - **PWM**: Standard PWM receiver (6 channels)
 - **PPM**: Pulse Position Modulation (single wire)
@@ -37,16 +61,17 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 
 ### 2. IMU Configuration
 
-```cpp
+```cppcpp
 // Primary IMU (used by control loop)
 #define USE_MPU6050_I2C        // Default control IMU
 // #define USE_MPU9250_SPI    // Alternative primary IMU
 
 // Secondary IMU (monitor/validation)
 #define USE_MPU9250_MONITOR_I2C  // Ground-truth validation IMU
-```
+```cpp
 
 **IMU Configuration Details:**
+
 - **Primary IMU**: Used for flight control loop and attitude estimation
 - **Monitor IMU**: Independent validation system (does NOT affect control)
 - **Dual IMU Setup**: MPU6050 (control) + MPU9250 (monitor) recommended
@@ -54,7 +79,7 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 
 ### 3. UDP Telemetry Configuration
 
-```cpp
+```cppcpp
 // Ethernet/W5500 Configuration
 #define W5500_CS_PIN 10              // Chip select pin
 #define W5500_SPI_BUS SPI            // SPI bus selection
@@ -65,9 +90,10 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 #define UDP_REMOTE_IP_2 1
 #define UDP_REMOTE_IP_3 100
 #define MONITOR_UDP_RATE_MS 10       // 100Hz telemetry rate
-```
+```cpp
 
 **UDP Telemetry Features:**
+
 - **Real-time Telemetry**: 100Hz data transmission
 - **Event Detection**: Command and disturbance monitoring
 - **Data Validation**: Control vs. Monitor IMU comparison
@@ -75,7 +101,7 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 
 ### 4. Sensor Range Configuration
 
-```cpp
+```cppcpp
 // Gyroscope Full Scale Range (deg/sec)
 #define GYRO_250DPS                 // ±250°/s (default)
 // #define GYRO_500DPS             // ±500°/s
@@ -87,43 +113,74 @@ Comprehensive configuration header for the FCU Madgwick Control Filter Research 
 // #define ACCEL_4G                // ±4G
 // #define ACCEL_8G                // ±8G
 // #define ACCEL_16G               // ±16G
-```
+```cpp
 
 ### 5. Channel Mapping
 
 #### PPM Channel Mapping
+
+```cppcpp
+// PPM channel mapping (logical -> physical PPM slot, 1-based)
+// CH1=Throttle, CH2=Aileron, CH3=Elevator, CH4=Rudder, CH5=Gear, CH6=Aux1
+#define PPM_MAP_CH1 1
+#define PPM_MAP_CH2 2
+#define PPM_MAP_CH3 3
+#define PPM_MAP_CH4 4
+#define PPM_MAP_CH5 5
+#define PPM_MAP_CH6 6
+
+// PPM sync/channel timing thresholds (µs) — override here if your TX differs
+// Standard PPM: sync gap >3000 µs, channel pulses 1000-2000 µs
+// PPM_SYNC_MIN_US: minimum gap duration to be recognised as end-of-frame
+// Reduce to ~2200 if your TX has a short sync gap; increase if you see false syncs
+#define PPM_SYNC_MIN_US 2500UL
+#define PPM_CH_MIN_US   700UL
+#define PPM_CH_MAX_US   2300UL
 ```cpp
-#define PPM_MAP_CH1 3   // throttle
-#define PPM_MAP_CH2 1   // aileron
-#define PPM_MAP_CH3 2   // elevator
-#define PPM_MAP_CH4 4   // rudder
-#define PPM_MAP_CH5 5   // gear / throttle cut
-#define PPM_MAP_CH6 6   // aux1 / transition
-```
+
+#### IBUS Channel Mapping
+
+```cppcpp
+// i-BUS Configuration
+// FS-iA6B dedicated i-BUS port → Teensy Serial5 RX (pin 23)
+// Serial5 is free — not used by motors, servos,IMU, or Ethernet
+#define IBUS_SERIAL       Serial5
+#define IBUS_UART_PIN     21    // Serial5 RX pin on Teensy 4.0
+
+// i-BUS channel mapping (logical → physical i-BUS channel, 1-based)
+#define IBUS_MAP_CH1      1    // throttle
+#define IBUS_MAP_CH2      2    // aileron
+#define IBUS_MAP_CH3      3    // elevator
+#define IBUS_MAP_CH4      4    // rudder
+#define IBUS_MAP_CH5      5    // gear / throttle cut
+#define IBUS_MAP_CH6      6    // aux1
+```cpp
 
 #### ELRS Channel Mapping
-```cpp
+
+```cppcpp
 #define ELRS_MAP_CH1 1  // throttle
 #define ELRS_MAP_CH2 2  // aileron
 #define ELRS_MAP_CH3 3  // elevator
 #define ELRS_MAP_CH4 4  // rudder
 #define ELRS_MAP_CH5 5  // gear / throttle cut
 #define ELRS_MAP_CH6 6  // aux1 / transition
-```
+```cpp
 
 #### SBUS Channel Mapping
-```cpp
+
+```cppcpp
 #define SBUS_MAP_CH1 1  // throttle (sbusChannels[0])
 #define SBUS_MAP_CH2 2  // aileron (sbusChannels[1])
 #define SBUS_MAP_CH3 3  // elevator (sbusChannels[2])
 #define SBUS_MAP_CH4 4  // rudder (sbusChannels[3])
 #define SBUS_MAP_CH5 5  // gear / throttle cut (sbusChannels[4])
 #define SBUS_MAP_CH6 6  // aux1 / transition (sbusChannels[5])
-```
+```cpp
 
 ### 6. Pin Definitions
 
-```cpp
+```cppcpp
 // PWM/PPM Receiver Pins
 const int ch1Pin = 15;  // throttle
 const int ch2Pin = 16;  // aileron
@@ -141,19 +198,20 @@ const int PPM_Pin = 23;
 
 // SPI Bus Assignment (W5500 Ethernet)
 // SPI:   SCK=13, MISO=12, MOSI=11, CS=10
-```
+```cpp
 
 ## Advanced Configuration
 
 ### Monitor System Configuration
 
-```cpp
+```cppcpp
 // Monitor comparison mode
 #define USE_MONITOR_ATTITUDE_COMPARISON  // Compare attitude angles (recommended)
 // If undefined: Compare raw sensor data only (calibration mode)
-```
+```cpp
 
 **Monitor System Features:**
+
 - **Independent Madgwick Filter**: Separate attitude estimation
 - **Real-time Validation**: Control vs. Monitor IMU comparison
 - **UDP Telemetry**: 100Hz data transmission to ground station
@@ -162,19 +220,33 @@ const int PPM_Pin = 23;
 
 ### ELRS Specific Configuration
 
-```cpp
+```cppcpp
 #define ELRS_UART_PORT 3           // Serial3 (RX3=pin 15, TX3=pin 14)
 #define ELRS_BAUD_RATE 420000      // CRSF baud rate
 #define ELRS_TIMEOUT_MS 100        // Failsafe timeout
 #define ELRS_CHANNELS 6            // Number of active channels
-```
+```cpp
 
 ### PWM Passthrough Configuration
 
+```cppcpp
+// FIX 10: USE_PWM_PASSTHROUGH_CH1 has been REMOVED.
+//
+// When USE_PPM_RX is active, defining USE_PWM_PASSTHROUGH_CH1 causes getCh1()
+// to be compiled (in the old radioComm.ino guard:
+//   #if defined USE_PWM_RX || defined USE_PWM_PASSTHROUGH_CH1).
+// getCh1() writes to channel_1_raw from ch1Pin (pin 15), which conflicts with
+// the PPM ISR also writing channel_1_raw from PPM_Pin (pin 23).
+// Result: channel_1_raw gets corrupted every time a PWM edge fires on pin 15,
+// which on a floating pin is constantly — keeping channel_1_raw near 0 and
+// triggering failSafe() every frame.
+//
+// If you genuinely need PWM passthrough for throttle alongside PPM for the
+// other channels, re-enable USE_HYBRID_RX instead and implement dedicated
+// handling that does not share channel_N_raw with the PPM path.
+//
+// #define USE_PWM_PASSTHROUGH_CH1   <-- KEEP THIS COMMENTED when using PPM
 ```cpp
-#define USE_PWM_PASSTHROUGH_CH1    // Direct PWM throttle input
-// Provides faster throttle response compared to PPM
-```
 
 ## Safety and Validation
 
@@ -182,7 +254,7 @@ const int PPM_Pin = 23;
 
 The header includes comprehensive sanity checks to ensure proper configuration:
 
-```cpp
+```cppcpp
 // Receiver validation (exactly one must be defined)
 #if (defined(USE_PWM_RX) + defined(USE_PPM_RX) + ...) != 1
 #error "You must define exactly one receiver type"
@@ -197,11 +269,12 @@ The header includes comprehensive sanity checks to ensure proper configuration:
 #if (defined(GYRO_250DPS) + defined(GYRO_500DPS) + ...) != 1
 #error "You must define exactly one gyro range"
 #endif
-```
+```cpp
 
 ## Hardware Requirements
 
 ### Required Hardware
+
 - **Teensy 4.0/4.1**: Flight controller board
 - **MPU6050**: Primary IMU (I2C)
 - **MPU9250**: Monitor IMU (I2C) - optional but recommended
@@ -209,7 +282,8 @@ The header includes comprehensive sanity checks to ensure proper configuration:
 - **Receiver**: ELRS/SBUS/DSM/PPM/PWM compatible
 
 ### Pin Connections
-```
+
+```cpp
 Teensy 4.0 Pin Assignment:
 ├── I2C Bus 0 (Wire): MPU6050
 │   ├── SDA: Pin 18
@@ -233,37 +307,40 @@ Teensy 4.0 Pin Assignment:
 └── Serial3: ELRS Receiver
     ├── RX3: Pin 15
     └── TX3: Pin 14
-```
+```cpp
 
 ## Configuration Examples
 
 ### Basic Flight Setup
-```cpp
+
+```cppcpp
 #define USE_ELRS_RX              // Modern radio system
 #define USE_MPU6050_I2C          // Standard IMU
 #define USE_MPU9250_MONITOR_I2C  // Enable monitoring
 #define GYRO_500DPS              // Moderate gyro range
 #define ACCEL_4G                 // Moderate accel range
-```
+```cpp
 
 ### Research Platform Setup
-```cpp
+
+```cppcpp
 #define USE_SBUS_RX              // Professional radio
 #define USE_MPU6050_I2C          // Control IMU
 #define USE_MPU9250_MONITOR_I2C  // Validation IMU
 #define USE_MONITOR_ATTITUDE_COMPARISON  // Full validation
 #define GYRO_1000DPS             // High-performance gyro
 #define ACCEL_8G                 // High-performance accel
-```
+```cpp
 
 ### Minimal Setup
-```cpp
+
+```cppcpp
 #define USE_PWM_RX               // Simple PWM receiver
 #define USE_MPU6050_I2C          // Basic IMU only
 // #define USE_MPU9250_MONITOR_I2C  // No monitoring
 #define GYRO_250DPS              // Standard gyro range
 #define ACCEL_2G                 // Standard accel range
-```
+```cpp
 
 ## Troubleshooting
 
@@ -291,10 +368,33 @@ Teensy 4.0 Pin Assignment:
 
 ## Version Information
 
-- **File Version**: Beta 1.1
-- **Last Updated**: 2025-01-10
+- **File Version**: Beta 1.2
+- **Last Updated**: 2026-04-14
 - **Author**: Patrick Andrasena T.
 - **Base Project**: dRehmFlight by Nicholas Rehm
+- **Target Platform**: Teensy 4.0/4.1
+
+## Configuration Enhancements
+
+### PPM System Improvements
+
+- **Configurable Timing**: Adjustable sync and channel timing thresholds
+- **Transmitter Compatibility**: Support for various PPM implementations
+- **Debug Support**: Built-in diagnostic capabilities
+- **Performance Optimization**: Enhanced interrupt handling
+
+### IBUS Serial Configuration
+
+- **Dedicated Serial Port**: Serial5 configuration for IBUS receivers
+- **Complete Channel Support**: Full 14-channel IBUS mapping
+- **Optimized Pinout**: Efficient pin assignment for IBUS hardware
+
+### Safety and Compatibility
+
+- **PWM Passthrough Resolution**: Fixed channel conflicts between PPM and PWM
+- **Enhanced Validation**: Comprehensive compile-time error checking
+- **Pin Management**: Improved pin conflict prevention and detection
+- **Documentation**: Detailed comments for all configuration options
 
 ## Related Files
 
