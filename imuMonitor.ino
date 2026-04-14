@@ -1,8 +1,8 @@
 //FCU Madgwick Control Filter Research Platform
 //Author: Patrick Andrasena T.
 //Project Start: 8/21/2025
-//Last Updated: 1/22/2026
-//Version: Beta 1.4.5
+//Last Updated: 4/14/2026
+//Version: Beta 1.4.6
 //
 //Project's base: 
 
@@ -15,8 +15,11 @@
 //========================================================================================================================//
 
 #include "quad.h"
+#include <Wire.h>
+#include <SPI.h>
 #include <Ethernet.h>
 #include <EthernetUdp.h>
+#include <Arduino.h>
 // Wire1 is available from Wire.h on Teensy 4.0 (no separate Wire1.h needed)
 
 //This file contains all necessary functions and code used for IMU monitoring (control system validation)
@@ -25,6 +28,22 @@
 //Monitor uses Wire1 (SDA1=RX4=pin 16, SCL1=TX4=pin 17) at 400kHz, separate from MPU6050 on Wire at 1000kHz
 //Data is sent via UDP over W5500 Ethernet (SPI) instead of serial for real-time telemetry
 //Enable/disable via USE_MPU9250_MONITOR_I2C in quad.h
+
+//========================================================================================================================//
+//                                          EXTERNAL VARIABLES                                                         //
+//========================================================================================================================//
+
+// External calibration parameters from main flight controller
+extern float AccErrorX_mon, AccErrorY_mon, AccErrorZ_mon;
+extern float GyroErrorX_mon, GyroErrorY_mon, GyroErrorZ_mon;
+extern float MagErrorX, MagErrorY, MagErrorZ;
+extern float MagScaleX, MagScaleY, MagScaleZ;
+extern float B_accel, B_gyro, B_mag;
+
+// Monitor IMU object declaration
+#if defined USE_MPU9250_MONITOR_I2C
+  MPU9250 mpu9250_monitor(Wire1, 0x69);
+#endif
 
 //
 // EVENT DETECTION AND DISTURBANCE MONITORING
@@ -96,11 +115,12 @@ struct EventFlags {
 } __attribute__((packed));
 
 // Structured data packet for UDP transmission
-// Packet format: [timestamp(uint32_t)] [event_flags(uint8_t)] [control_raw(9 floats)] [monitor_raw(9 floats)] [control_attitude(3 floats)] [monitor_attitude(3 floats)] [errors(3 floats)]
-// Total: 4 + 1 + (27 * 4) = 113 bytes
+// Packet format: [timestamp(uint32_t)] [event_flags(uint8_t)] [B_madgwick(float)] [control_raw(9 floats)] [monitor_raw(9 floats)] [control_attitude(3 floats)] [monitor_attitude(3 floats)] [errors(3 floats)]
+// Total: 4 + 1 + 4 + (27 * 4) = 117 bytes
 struct IMUDataPacket {
   uint32_t timestamp_us;  // Timestamp in microseconds
   EventFlags flags;        // Event detection flags
+  float B_madgwick;       // Madgwick filter beta parameter from main controller
   
   // Control IMU raw sensors (MPU6050)
   float ctrl_acc_x, ctrl_acc_y, ctrl_acc_z;
@@ -148,6 +168,8 @@ void monitorIMUinit() {
     Serial.println(status_mon);
     while(1) {}
   }
+  
+  (void)status_mon; // Suppress unused variable warning // stats on mpu9250 IMU monitor
   
   // Configure monitor IMU using same range settings as primary IMU (from quad.h)
   // This ensures consistent scaling for comparison/ground-truth purposes
@@ -223,6 +245,12 @@ void getIMUdataMonitor() {
   float AccX_raw = mpu9250_monitor.getAccelX_mss() / 9.807f;
   float AccY_raw = mpu9250_monitor.getAccelY_mss() / 9.807f;
   float AccZ_raw = mpu9250_monitor.getAccelZ_mss() / 9.807f;
+  
+  // Apply monitor IMU calibration corrections for accelerometer
+  AccX_raw = AccX_raw - AccErrorX_mon;
+  AccY_raw = AccY_raw - AccErrorY_mon;
+  AccZ_raw = AccZ_raw - AccErrorZ_mon;
+  
   AccX_mon = (1.0 - B_accel)*AccX_mon_prev + B_accel*AccX_raw;
   AccY_mon = (1.0 - B_accel)*AccY_mon_prev + B_accel*AccY_raw;
   AccZ_mon = (1.0 - B_accel)*AccZ_mon_prev + B_accel*AccZ_raw;
@@ -234,6 +262,12 @@ void getIMUdataMonitor() {
   float GyroX_raw = mpu9250_monitor.getGyroX_rads() * 57.29577951f;
   float GyroY_raw = mpu9250_monitor.getGyroY_rads() * 57.29577951f;
   float GyroZ_raw = mpu9250_monitor.getGyroZ_rads() * 57.29577951f;
+  
+  // Apply monitor IMU calibration corrections for gyro
+  GyroX_raw = GyroX_raw - GyroErrorX_mon;
+  GyroY_raw = GyroY_raw - GyroErrorY_mon;
+  GyroZ_raw = GyroZ_raw - GyroErrorZ_mon;
+  
   GyroX_mon = (1.0 - B_gyro)*GyroX_mon_prev + B_gyro*GyroX_raw;
   GyroY_mon = (1.0 - B_gyro)*GyroY_mon_prev + B_gyro*GyroY_raw;
   GyroZ_mon = (1.0 - B_gyro)*GyroZ_mon_prev + B_gyro*GyroZ_raw;
@@ -255,6 +289,14 @@ void getIMUdataMonitor() {
   MagY_mon_prev = MagY_mon;
   MagZ_mon_prev = MagZ_mon;
 }
+
+// Function declarations
+void monitorIMUinit();
+void getIMUdataMonitor();
+void MadgwickMonitor(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz, float invSampleFreq);
+void Madgwick6DOFMonitor(float gx, float gy, float gz, float ax, float ay, float az, float invSampleFreq);
+void compareAttitude();
+void sendIMUDataUDP();
 
 // Separate Madgwick filter for monitor IMU (ground truth attitude)
 // Always computed for UDP telemetry (both raw sensor and attitude data are sent)
@@ -590,6 +632,9 @@ void sendIMUDataUDP() {
   
   // Populate packet with timestamp
   dataPacket.timestamp_us = micros();
+  
+  // Madgwick filter beta parameter from main controller
+  dataPacket.B_madgwick = B_madgwick;
   
   // Control IMU raw sensors (MPU6050) - ALWAYS sent
   dataPacket.ctrl_acc_x = AccX;
