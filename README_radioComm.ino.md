@@ -5,16 +5,34 @@ Comprehensive radio communication system supporting multiple receiver types for 
 ## Overview
 
 `radioComm.ino` is a modular radio communication library that:
+
 - **Multi-Protocol Support**: PWM, PPM, SBUS, DSM, IBUS, ELRS receivers
 - **Interrupt-Driven**: High-performance pulse timing and decoding
 - **Unified Interface**: Single API for all receiver types
 - **Real-time Processing**: Sub-millisecond response times
 - **Channel Mapping**: Flexible logical to physical channel assignment
 - **Failsafe Safety**: Automatic signal loss detection and recovery
+- **PPM Bug Fixes**: Comprehensive PPM decoding reliability improvements
+
+## Key Updates in B-1.4.7
+
+### PPM System Reliability Fixes
+
+- **FIX 1**: Removed channel_N_raw = 0 wipe on sync detection
+- **FIX 2**: Corrected sync detection threshold to >2500 µs
+- **FIX 3**: Removed all Serial.print() from ISR for performance
+- **FIX 4**: channel_N_raw and ppm_isr_count declared volatile
+- **FIX 5**: togglePPMDebug() removed from main loop
+- **FIX 6**: Removed no-op map() call in ISR
+- **FIX 7**: ppm_counter reset on first sync as well as subsequent ones
+- **FIX 8**: PPM pin set to plain INPUT (not INPUT_PULLUP)
+- **FIX 9**: ppm_counter declared volatile
+- **FIX 10**: getCh1-6 guard changed to USE_PWM_RX only
 
 ## Supported Receiver Types
 
 ### 1. PWM (Pulse Width Modulation)
+
 - **Protocol**: Standard PWM servo signals
 - **Channels**: Up to 6 independent channels
 - **Update Rate**: ~50Hz per channel
@@ -23,6 +41,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 - **Latency**: ~20ms typical
 
 ### 2. PPM (Pulse Position Modulation)
+
 - **Protocol**: Single-wire multiplexed PWM
 - **Channels**: Up to 8 channels (typically 6 used)
 - **Update Rate**: ~50Hz complete frame
@@ -31,6 +50,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 - **Latency**: ~20ms typical
 
 ### 3. SBUS (Serial Bus)
+
 - **Protocol**: Futaba SBUS inverted serial
 - **Channels**: Up to 16 channels (typically 6 used)
 - **Update Rate**: 100Hz (10ms frames)
@@ -39,6 +59,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 - **Latency**: ~10ms typical
 
 ### 4. DSM (Spektrum DSM)
+
 - **Protocol**: Spektrum DSM2/DSMX serial
 - **Channels**: Up to 12 channels (typically 6 used)
 - **Update Rate**: 125Hz (8ms frames)
@@ -47,6 +68,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 - **Latency**: ~8ms typical
 
 ### 5. ELRS (ExpressLTS Radio System)
+
 - **Protocol**: CRSF (Crossfire Radio System Format)
 - **Channels**: Up to 16 channels (typically 6 used)
 - **Update Rate**: 250Hz (4ms frames)
@@ -55,6 +77,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 - **Latency**: ~4ms typical
 
 ### 6. IBUS (FlySky IBUS)
+
 - **Protocol**: FlySky IBUS serial
 - **Channels**: Up to 14 channels (typically 6 used)
 - **Update Rate**: 100Hz (10ms frames)
@@ -64,7 +87,7 @@ Comprehensive radio communication system supporting multiple receiver types for 
 
 ## Architecture Overview
 
-```
+```cpp
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   Physical      │    │   Protocol      │    │   Unified       │
 │   Interface     │───▶│   Decoder       │───▶│   API           │
@@ -80,13 +103,13 @@ Comprehensive radio communication system supporting multiple receiver types for 
                        │   Control       │
                        │   System        │
                        └─────────────────┘
-```
+```cpp
 
 ## Core Functions
 
 ### 1. Initialization Function
 
-```cpp
+```cppcpp
 void radioSetup() {
   // Configures selected receiver type
   // Initializes hardware interfaces
@@ -94,12 +117,13 @@ void radioSetup() {
   // Configures serial ports
   // Applies pin modes and pull-ups
 }
-```
+```cpp
 
 #### Receiver-Specific Initialization
 
 **PWM Receiver Setup:**
-```cpp
+
+```cppcpp
 #if defined USE_PWM_RX
   // Configure interrupt pins for each channel
   pinMode(ch1Pin, INPUT_PULLUP);
@@ -111,10 +135,11 @@ void radioSetup() {
   attachInterrupt(digitalPinToInterrupt(ch2Pin), getCh2, CHANGE);
   // ... for all 6 channels
 #endif
-```
+```cpp
 
 **PPM Receiver Setup:**
-```cpp
+
+```cppcpp
 #if defined USE_PPM_RX
   // Configure single PPM pin
   pinMode(PPM_Pin, INPUT_PULLUP);
@@ -122,10 +147,11 @@ void radioSetup() {
   // Attach PPM interrupt handler
   attachInterrupt(digitalPinToInterrupt(PPM_Pin), getPPM, CHANGE);
 #endif
-```
+```cpp
 
 **Serial Receiver Setup:**
-```cpp
+
+```cppcpp
 #if defined USE_SBUS_RX
   sbus.begin();                    // Initialize SBUS library
 #elif defined USE_ELRS_RX
@@ -133,11 +159,11 @@ void radioSetup() {
 #elif defined USE_DSM_RX
   Serial3.begin(115000);           // Initialize DSM serial
 #endif
-```
+```cpp
 
 ### 2. Unified Channel Access
 
-```cpp
+```cppcpp
 unsigned long getRadioPWM(int ch_num) {
   // Unified interface for all receiver types
   // Returns PWM value (1000-2000μs)
@@ -159,14 +185,15 @@ unsigned long getRadioPWM(int ch_num) {
     return 1500;                   // Failsafe center position
   #endif
 }
-```
+```cpp
 
 ## Interrupt Service Routines
 
 ### 1. PWM Interrupt Handlers
 
 **Channel-Specific ISR:**
-```cpp
+
+```cppcpp
 void getCh1() {
   int trigger = digitalRead(ch1Pin);
   if(trigger == 1) {
@@ -176,9 +203,10 @@ void getCh1() {
     channel_1_raw = micros() - rising_edge_start_1;  // Calculate pulse width
   }
 }
-```
+```cpp
 
 **PWM Timing Logic:**
+
 - **Rising Edge**: Record timestamp
 - **Falling Edge**: Calculate pulse width
 - **Pulse Width**: 1000-2000μs range
@@ -187,40 +215,80 @@ void getCh1() {
 
 ### 2. PPM Interrupt Handler
 
-```cpp
+```cppcpp
 void getPPM() {
-  unsigned long dt_ppm;
-  int trig = digitalRead(PPM_Pin);
-  
-  if(trig == 1) {  // Rising edge only
-    dt_ppm = micros() - time_ms;
-    time_ms = micros();
-    
-    if(dt_ppm > 5000) {  // Frame sync pulse (>5ms)
-      ppm_counter = 0;   // Reset channel counter
+  ppm_isr_count++;
+
+  static unsigned long last_rising_edge = 0;
+  static int last_pin_state = LOW;
+
+  unsigned long current_time = micros();
+  int current_pin_state = digitalRead(PPM_Pin);
+
+  if (current_pin_state == HIGH && last_pin_state == LOW) {
+    unsigned long pulse_position = current_time - last_rising_edge;
+
+    // Skip first edge after boot
+    if (last_rising_edge == 0) {
+      last_rising_edge = current_time;
+      last_pin_state = current_pin_state;
+      return;
     }
-    
-    // Channel assignment based on counter
-    if(ppm_counter == 1) channel_1_raw = dt_ppm;
-    if(ppm_counter == 2) channel_2_raw = dt_ppm;
-    // ... for all 6 channels
-    
-    ppm_counter++;
+
+    #ifndef PPM_SYNC_MIN_US
+      #define PPM_SYNC_MIN_US 2500UL
+    #endif
+    #ifndef PPM_CH_MIN_US
+      #define PPM_CH_MIN_US   700UL
+    #endif
+    #ifndef PPM_CH_MAX_US
+      #define PPM_CH_MAX_US   2300UL
+    #endif
+
+    if (pulse_position >= PPM_SYNC_MIN_US) {
+      // New frame — reset counter, keep existing channel values intact
+      ppm_counter = 0;
+
+    } else if (pulse_position >= PPM_CH_MIN_US && pulse_position <= PPM_CH_MAX_US) {
+      ppm_counter++;
+      unsigned long ch_value = constrain(pulse_position, 1000UL, 2000UL);
+
+      if      (ppm_counter == 1) channel_1_raw = ch_value;
+      else if (ppm_counter == 2) channel_2_raw = ch_value;
+      else if (ppm_counter == 3) channel_3_raw = ch_value;
+      else if (ppm_counter == 4) channel_4_raw = ch_value;
+      else if (ppm_counter == 5) channel_5_raw = ch_value;
+      else if (ppm_counter == 6) channel_6_raw = ch_value;
+    }
+
+    last_rising_edge = current_time;
   }
+
+  last_pin_state = current_pin_state;
 }
-```
+```cpp
 
 **PPM Frame Structure:**
-```
-[Sync Pulse >5ms][CH1][CH2][CH3][CH4][CH5][CH6][CH7][CH8][Sync Pulse]
+
+```cpp
+[Sync Pulse >2.5ms][CH1][CH2][CH3][CH4][CH5][CH6][CH7][CH8][Sync Pulse]
      1000-2000μs each channel
      Total frame: ~22.5ms (50Hz)
-```
+```cpp
+
+**Reliability Improvements:**
+
+- **Edge Detection**: Only processes rising edges for reliability
+- **Sync Detection**: Fixed threshold at 2500µs (not 5000µs)
+- **Channel Preservation**: Doesn't zero channels on sync detection
+- **Volatile Variables**: All ISR-shared variables properly declared
+- **No Serial in ISR**: Removed all debug prints from interrupt context
 
 ### 3. Serial Event Handlers
 
 **DSM Serial Event:**
-```cpp
+
+```cppcpp
 void serialEvent3(void) {
   #if defined USE_DSM_RX
     while (Serial3.available()) {
@@ -228,9 +296,10 @@ void serialEvent3(void) {
     }
   #endif
 }
-```
+```cpp
 
 **Serial Processing:**
+
 - **Buffer Management**: Handle incoming serial data
 - **Frame Parsing**: Decode protocol-specific frames
 - **Channel Extraction**: Extract PWM values from frames
@@ -241,7 +310,8 @@ void serialEvent3(void) {
 ### Logical to Physical Mapping
 
 **Configuration in quad.h:**
-```cpp
+
+```cppcpp
 // PPM Channel Mapping
 #define PPM_MAP_CH1 3   // Logical CH1 → Physical slot 3
 #define PPM_MAP_CH2 1   // Logical CH2 → Physical slot 1
@@ -249,9 +319,10 @@ void serialEvent3(void) {
 #define PPM_MAP_CH4 4   // Logical CH4 → Physical slot 4
 #define PPM_MAP_CH5 5   // Logical CH5 → Physical slot 5
 #define PPM_MAP_CH6 6   // Logical CH6 → Physical slot 6
-```
+```cpp
 
 **Standard Channel Assignment:**
+
 - **CH1**: Throttle (1000-2000μs, 1500μs center)
 - **CH2**: Aileron/Roll (1000-2000μs, 1500μs center)
 - **CH3**: Elevator/Pitch (1000-2000μs, 1500μs center)
@@ -265,30 +336,31 @@ void serialEvent3(void) {
 
 | Receiver Type | Update Rate | Latency | Resolution | Accuracy |
 |---------------|-------------|---------|------------|----------|
-| PWM | 50Hz | ~20ms | 1μs | ±1μs |
-| PPM | 50Hz | ~20ms | 1μs | ±1μs |
-| SBUS | 100Hz | ~10ms | 10μs | ±10μs |
-| DSM | 125Hz | ~8ms | 10μs | ±10μs |
-| ELRS | 250Hz | ~4ms | 10μs | ±10μs |
-| IBUS | 100Hz | ~10ms | 10μs | ±10μs |
+| PWM           | 50Hz        | ~20ms   | 1μs        | ±1μs      |
+| PPM           | 50Hz        | ~20ms   | 1μs        | ±1μs      |
+| SBUS          | 100Hz       | ~10ms   | 10μs       | ±10μs     |
+| DSM           | 125Hz       | ~8ms    | 10μs       | ±10μs     |
+| ELRS          | 250Hz       | ~4ms    | 10μs       | ±10μs     |
+| IBUS          | 100Hz       | ~10ms   | 10μs       | ±10μs     |
 
 ### CPU Usage
 
-| Receiver Type | CPU Usage | Memory Usage | Interrupt Load |
-|---------------|-----------|-------------|----------------|
-| PWM | ~5% | ~200B | 6 interrupts/frame |
-| PPM | ~2% | ~100B | 1 interrupt/frame |
-| SBUS | ~3% | ~500B | Serial interrupts |
-| DSM | ~3% | ~500B | Serial interrupts |
-| ELRS | ~4% | ~1KB | Serial interrupts |
-| IBUS | ~3% | ~500B | Serial interrupts |
+| Receiver Type | CPU Usage | Memory Usage | Interrupt Load      |
+|---------------|-----------|-------------|---------------------|
+| PWM           | ~5%       | ~200B       | 6 interrupts/frame  |
+| PPM           | ~2%       | ~100B       | 1 interrupt/frame   |
+| SBUS          | ~3%       | ~500B       | Serial interrupts   |
+| DSM           | ~3%       | ~500B       | Serial interrupts   |
+| ELRS          | ~4%       | ~1KB        | Serial interrupts   |
+| IBUS          | ~3%       | ~500B       | Serial interrupts   |
 
 ## Hardware Requirements
 
 ### Pin Assignments
 
 **PWM/PPM Pins:**
-```cpp
+
+```cppcpp
 const int ch1Pin = 15;  // Throttle
 const int ch2Pin = 16;  // Aileron
 const int ch3Pin = 17;  // Elevator
@@ -297,33 +369,38 @@ const int ch5Pin = 21;  // Gear
 const int ch6Pin = 22;  // Aux1
 
 const int PPM_Pin = 23; // PPM input
-```
+```cpp
 
 **Serial Ports:**
-```cpp
+
+```cppcpp
 // Serial3: DSM/ELRS/IBUS
 // RX3: Pin 15
 // TX3: Pin 14
-```
+```cpp
 
 **SBUS Pin:**
-```cpp
+
+```cppcpp
 // RX5: Pin 21 (inverted signal)
-```
+```cpp
 
 ### Hardware Compatibility
 
 **PWM Receivers:**
+
 - Standard PWM receivers (Futaba, Hitec, etc.)
 - 6-channel minimum required
 - 3.3V/5V compatible inputs
 
 **PPM Receivers:**
+
 - PPM-capable receivers
 - Single-wire connection
 - 3.3V/5V compatible inputs
 
 **Serial Receivers:**
+
 - SBUS: Futaba SBUS receivers (inverted signal)
 - ELRS: ExpressLTS receivers (3.3V UART)
 - DSM: Spektrum DSM receivers (3.3V UART)
@@ -334,7 +411,8 @@ const int PPM_Pin = 23; // PPM input
 ### 1. Receiver Type Selection
 
 **In quad.h:**
-```cpp
+
+```cppcpp
 // Select exactly one receiver type
 #define USE_ELRS_RX          // Modern high-performance
 // #define USE_SBUS_RX       // Professional standard
@@ -342,12 +420,13 @@ const int PPM_Pin = 23; // PPM input
 // #define USE_PWM_RX        // Standard analog
 // #define USE_PPM_RX        // Single-wire
 // #define USE_IBUS_RX       // FlySky systems
-```
+```cpp
 
 ### 2. Channel Mapping
 
 **Custom Channel Assignment:**
-```cpp
+
+```cppcpp
 // Example: Custom PPM mapping
 #define PPM_MAP_CH1 1   // Throttle on slot 1
 #define PPM_MAP_CH2 2   // Aileron on slot 2
@@ -355,30 +434,33 @@ const int PPM_Pin = 23; // PPM input
 #define PPM_MAP_CH4 4   // Rudder on slot 4
 #define PPM_MAP_CH5 5   // Gear on slot 5
 #define PPM_MAP_CH6 6   // Aux1 on slot 6
-```
+```cpp
 
 ### 3. Pin Configuration
 
 **Custom Pin Assignment:**
-```cpp
+
+```cppcpp
 // Example: Custom PWM pins
 const int ch1Pin = 2;   // Throttle on pin 2
 const int ch2Pin = 3;   // Aileron on pin 3
 // ... etc
-```
+```cpp
 
 ## Failsafe and Safety
 
 ### Signal Loss Detection
 
 **Timeout Monitoring:**
-```cpp
+
+```cppcpp
 // Each receiver type implements signal loss detection
 // Automatic failsafe values applied on signal loss
 // Default failsafe: 1500μs (center position)
-```
+```cpp
 
 **Failsafe Values:**
+
 - **Throttle (CH1)**: 1000μs (motor off)
 - **Attitude (CH2-4)**: 1500μs (level flight)
 - **Gear (CH5)**: 2000μs (throttle cut active)
@@ -387,11 +469,13 @@ const int ch2Pin = 3;   // Aileron on pin 3
 ### Safety Features
 
 **Arming Safety:**
+
 - Throttle must be low (<1050μs) to arm
 - Gear switch must be in safe position
 - Signal validation before motor output
 
 **Signal Validation:**
+
 - Pulse width range checking (1000-2000μs)
 - Update rate monitoring
 - Frame synchronization validation
@@ -434,7 +518,8 @@ const int ch2Pin = 3;   // Aileron on pin 3
 ### Debugging Tools
 
 **Serial Output:**
-```cpp
+
+```cppcpp
 // Add to main loop for debugging
 void printRadioChannels() {
   Serial.print("CH1: "); Serial.print(getRadioPWM(1));
@@ -444,10 +529,11 @@ void printRadioChannels() {
   Serial.print(" CH5: "); Serial.print(getRadioPWM(5));
   Serial.print(" CH6: "); Serial.println(getRadioPWM(6));
 }
-```
+```cpp
 
 **Signal Quality Monitoring:**
-```cpp
+
+```cppcpp
 // Monitor signal quality metrics
 void checkSignalQuality() {
   static unsigned long lastUpdate = 0;
@@ -458,12 +544,13 @@ void checkSignalQuality() {
     lastUpdate = millis();
   }
 }
-```
+```cpp
 
 ## Integration Examples
 
 ### Basic Usage
-```cpp
+
+```cppcpp
 void setup() {
   radioSetup();  // Initialize receiver
 }
@@ -480,10 +567,11 @@ void loop() {
   // Use channel values for flight control
   // ...
 }
-```
+```cpp
 
 ### Advanced Usage with Validation
-```cpp
+
+```cppcpp
 void loop() {
   // Read channels with validation
   for (int i = 1; i <= 6; i++) {
@@ -499,25 +587,65 @@ void loop() {
   // Process valid signals
   processFlightControl();
 }
-```
+```cpp
 
 ## Version Information
 
-- **File Version**: Beta 1.3
-- **Last Updated**: 2022-07-29
-- **Author**: Nicholas Rehm
+- **File Version**: B-1.4.8 (IBUS Integration)
+- **Last Updated**: 2026-04-14
+- **Author**: Nicholas Rehm (Base), Patrick Andrasena T. (Enhancements)
 - **Base Project**: dRehmFlight
-- **Enhanced by**: Patrick Andrasena T.
+- **Target Platform**: Teensy 4.0/4.1
+
+## Key Updates in B-1.4.8
+
+### IBUS Integration Features
+
+- **Complete IBUS Support**: Full FlySky IBUS protocol implementation
+- **Multi-Receiver Debug**: Universal debugPPMSignal() function for all receiver types
+- **Compilation Stability**: Resolved all scope and declaration issues
+- **Extern Declarations**: Proper cross-file variable referencing
+
+### Enhanced Debug Capabilities
+
+- **Receiver-Aware Debugging**: Conditional debug output based on receiver type
+- **Signal Quality Monitoring**: Different quality metrics for different receivers
+- **Universal Compatibility**: Single debug function works with all receiver types
+
+### Previous PPM Improvements (B-1.4.7)
+
+#### PPM System Reliability Fixes
+
+1. **Channel Data Preservation**: Fixed channel wiping on sync detection
+2. **Sync Threshold**: Corrected from 5000µs to 2500µs for better compatibility
+3. **ISR Performance**: Removed Serial.print() calls from interrupt context
+4. **Memory Safety**: Proper volatile declarations for ISR-shared variables
+5. **Debug Control**: Moved debug functions out of main loop
+6. **Code Optimization**: Removed unnecessary map() operations
+7. **Counter Reset**: Fixed ppm_counter initialization on first sync
+8. **Input Configuration**: Changed to plain INPUT for better signal detection
+9. **Variable Safety**: Added volatile to ppm_counter
+10. **Compilation Guard**: Fixed PWM function compilation conflicts
+
+### Performance Benefits
+
+- **Reliability**: Eliminates PPM signal dropouts and false syncs
+- **Performance**: Faster ISR execution without serial operations
+- **Compatibility**: Works with wider range of PPM receivers
+- **Stability**: Proper memory barrier handling for shared variables
+- **Debugging**: Controlled debug output without impacting performance
 
 ## Dependencies
 
 ### Required Libraries
+
 - **PWMServo**: Motor control library
 - **SBUS**: SBUS protocol library (if used)
 - **ELRS**: ELRS/CRSF library (if used)
 - **DSMRX**: DSM protocol library (if used)
 
 ### Required Hardware
+
 - Teensy 4.0/4.1 development board
 - Compatible radio receiver
 - Appropriate wiring and connectors
