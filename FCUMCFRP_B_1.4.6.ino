@@ -417,177 +417,183 @@ void setup() {
 
 // ============================================================
 // FLEXPWM FULL RESET BLOCK — Teensy 4.0 (IMXRT1062)
-// Place this at the VERY TOP of setup(), before Serial.begin()
-// and before any pinMode() calls.
-//
-// WHY THIS IS NEEDED:
-// FlexPWM peripheral registers on the RT1062 survive soft resets
-// and USB reflash. Any previous firmware that used FlexPWM output
-// (PWMServo, analogWrite) or capture (PWM passthrough) leaves the
-// submodule running and the IOMUXC pad mux pointed at FlexPWM
-// instead of GPIO. A normal pinMode() only sets the GPIO mux —
-// it does NOT stop the FlexPWM submodule clock that is still
-// sampling or driving the pin underneath.
-//
-// This block explicitly:
-//   1. Stops all 4 submodules of all 4 FlexPWM modules (MCTRL)
-//   2. Clears all control and value registers for each submodule
-//   3. Forces every affected pin's IOMUXC mux back to ALT5 (GPIO)
-//   4. Sets all those pins to INPUT before any other code runs
-//
-// IOMUXC ALT values for Teensy 4.0 pins:
-//   ALT1 = FlexPWM   ALT5 = GPIO
-//
-// Pin-to-IOMUXC register mapping (from IMXRT1062 datasheet):
-//   Pin  0 = GPIO_AD_B0_03  Pin  1 = GPIO_AD_B0_02
-//   Pin  2 = GPIO_EMC_04    Pin  3 = GPIO_EMC_05
-//   Pin  4 = GPIO_EMC_06    Pin  5 = GPIO_EMC_08
-//   Pin  6 = GPIO_B0_10     Pin  7 = GPIO_B1_01
-//   Pin  8 = GPIO_B1_00     Pin  9 = GPIO_B0_11
-//   Pin 15 = GPIO_AD_B1_03  Pin 16 = GPIO_AD_B1_07 (Wire1 SDA — skip)
-//   Pin 17 = GPIO_AD_B1_06 (Wire1 SCL — skip)
-//   Pin 20 = GPIO_AD_B1_10  Pin 21 = GPIO_AD_B1_11
-//   Pin 22 = GPIO_AD_B1_08  Pin 23 = GPIO_AD_B1_09  ← PPM pin
-// ============================================================
 
-// ── Step 1: Stop all FlexPWM submodules ──────────────────────
-// MCTRL LDOK + RUN bits: clear RUN for all 4 SMs in each module
-// FLEXPWM_MCTRL_RUN(n) sets bit n in the RUN field (bits 0-3)
-FLEXPWM1_MCTRL = 0;   // stop all SM0-3 of FlexPWM1
-FLEXPWM2_MCTRL = 0;   // stop all SM0-3 of FlexPWM2
-FLEXPWM3_MCTRL = 0;   // stop all SM0-3 of FlexPWM3
-FLEXPWM4_MCTRL = 0;   // stop all SM0-3 of FlexPWM4
+// if you think you've messed up and FlexPWM might be the cause, here is the fallback measure to disable every FlexPWM pin.
+// since FlexPWM are firmware level latch that can't be revert back by simply power cycle or reboot.
+// so, just compile this together with the whole sketch once, after that you can comment it again after compiled
+// and recompile the sketch withot it.
 
-// ── Step 2: Clear all submodule control/value registers ──────
-// FlexPWM1 — SM0 (pins 4, 33), SM1 (pins 8, 7), SM2 (pins 24, 25), SM3 (NC)
-FLEXPWM1_SM0CTRL2 = 0; FLEXPWM1_SM0CTRL = 0;
-FLEXPWM1_SM0VAL0  = 0; FLEXPWM1_SM0VAL1 = 0;
-FLEXPWM1_SM0VAL2  = 0; FLEXPWM1_SM0VAL3 = 0;
-FLEXPWM1_SM0VAL4  = 0; FLEXPWM1_SM0VAL5 = 0;
+// // Place this at the VERY TOP of setup(), before Serial.begin()
+// // and before any pinMode() calls.
+// //
+// // WHY THIS IS NEEDED:
+// // FlexPWM peripheral registers on the RT1062 survive soft resets
+// // and USB reflash. Any previous firmware that used FlexPWM output
+// // (PWMServo, analogWrite) or capture (PWM passthrough) leaves the
+// // submodule running and the IOMUXC pad mux pointed at FlexPWM
+// // instead of GPIO. A normal pinMode() only sets the GPIO mux —
+// // it does NOT stop the FlexPWM submodule clock that is still
+// // sampling or driving the pin underneath.
+// //
+// // This block explicitly:
+// //   1. Stops all 4 submodules of all 4 FlexPWM modules (MCTRL)
+// //   2. Clears all control and value registers for each submodule
+// //   3. Forces every affected pin's IOMUXC mux back to ALT5 (GPIO)
+// //   4. Sets all those pins to INPUT before any other code runs
+// //
+// // IOMUXC ALT values for Teensy 4.0 pins:
+// //   ALT1 = FlexPWM   ALT5 = GPIO
+// //
+// // Pin-to-IOMUXC register mapping (from IMXRT1062 datasheet):
+// //   Pin  0 = GPIO_AD_B0_03  Pin  1 = GPIO_AD_B0_02
+// //   Pin  2 = GPIO_EMC_04    Pin  3 = GPIO_EMC_05
+// //   Pin  4 = GPIO_EMC_06    Pin  5 = GPIO_EMC_08
+// //   Pin  6 = GPIO_B0_10     Pin  7 = GPIO_B1_01
+// //   Pin  8 = GPIO_B1_00     Pin  9 = GPIO_B0_11
+// //   Pin 15 = GPIO_AD_B1_03  Pin 16 = GPIO_AD_B1_07 (Wire1 SDA — skip)
+// //   Pin 17 = GPIO_AD_B1_06 (Wire1 SCL — skip)
+// //   Pin 20 = GPIO_AD_B1_10  Pin 21 = GPIO_AD_B1_11
+// //   Pin 22 = GPIO_AD_B1_08  Pin 23 = GPIO_AD_B1_09  ← PPM pin
+// // ============================================================
 
-FLEXPWM1_SM1CTRL2 = 0; FLEXPWM1_SM1CTRL = 0;
-FLEXPWM1_SM1VAL0  = 0; FLEXPWM1_SM1VAL1 = 0;
-FLEXPWM1_SM1VAL2  = 0; FLEXPWM1_SM1VAL3 = 0;
-FLEXPWM1_SM1VAL4  = 0; FLEXPWM1_SM1VAL5 = 0;
+// // ── Step 1: Stop all FlexPWM submodules ──────────────────────
+// // MCTRL LDOK + RUN bits: clear RUN for all 4 SMs in each module
+// // FLEXPWM_MCTRL_RUN(n) sets bit n in the RUN field (bits 0-3)
+// FLEXPWM1_MCTRL = 0;   // stop all SM0-3 of FlexPWM1
+// FLEXPWM2_MCTRL = 0;   // stop all SM0-3 of FlexPWM2
+// FLEXPWM3_MCTRL = 0;   // stop all SM0-3 of FlexPWM3
+// FLEXPWM4_MCTRL = 0;   // stop all SM0-3 of FlexPWM4
 
-FLEXPWM1_SM2CTRL2 = 0; FLEXPWM1_SM2CTRL = 0;
-FLEXPWM1_SM2VAL0  = 0; FLEXPWM1_SM2VAL1 = 0;
-FLEXPWM1_SM2VAL2  = 0; FLEXPWM1_SM2VAL3 = 0;
-FLEXPWM1_SM2VAL4  = 0; FLEXPWM1_SM2VAL5 = 0;
+// // ── Step 2: Clear all submodule control/value registers ──────
+// // FlexPWM1 — SM0 (pins 4, 33), SM1 (pins 8, 7), SM2 (pins 24, 25), SM3 (NC)
+// FLEXPWM1_SM0CTRL2 = 0; FLEXPWM1_SM0CTRL = 0;
+// FLEXPWM1_SM0VAL0  = 0; FLEXPWM1_SM0VAL1 = 0;
+// FLEXPWM1_SM0VAL2  = 0; FLEXPWM1_SM0VAL3 = 0;
+// FLEXPWM1_SM0VAL4  = 0; FLEXPWM1_SM0VAL5 = 0;
 
-FLEXPWM1_SM3CTRL2 = 0; FLEXPWM1_SM3CTRL = 0;
-FLEXPWM1_SM3VAL0  = 0; FLEXPWM1_SM3VAL1 = 0;
-FLEXPWM1_SM3VAL2  = 0; FLEXPWM1_SM3VAL3 = 0;
-FLEXPWM1_SM3VAL4  = 0; FLEXPWM1_SM3VAL5 = 0;
+// FLEXPWM1_SM1CTRL2 = 0; FLEXPWM1_SM1CTRL = 0;
+// FLEXPWM1_SM1VAL0  = 0; FLEXPWM1_SM1VAL1 = 0;
+// FLEXPWM1_SM1VAL2  = 0; FLEXPWM1_SM1VAL3 = 0;
+// FLEXPWM1_SM1VAL4  = 0; FLEXPWM1_SM1VAL5 = 0;
 
-// FlexPWM2 — SM0 (pins 6, 9), SM1 (pin 35), SM2 (pins 26, 27), SM3 (NC)
-FLEXPWM2_SM0CTRL2 = 0; FLEXPWM2_SM0CTRL = 0;
-FLEXPWM2_SM0VAL0  = 0; FLEXPWM2_SM0VAL1 = 0;
-FLEXPWM2_SM0VAL2  = 0; FLEXPWM2_SM0VAL3 = 0;
-FLEXPWM2_SM0VAL4  = 0; FLEXPWM2_SM0VAL5 = 0;
+// FLEXPWM1_SM2CTRL2 = 0; FLEXPWM1_SM2CTRL = 0;
+// FLEXPWM1_SM2VAL0  = 0; FLEXPWM1_SM2VAL1 = 0;
+// FLEXPWM1_SM2VAL2  = 0; FLEXPWM1_SM2VAL3 = 0;
+// FLEXPWM1_SM2VAL4  = 0; FLEXPWM1_SM2VAL5 = 0;
 
-FLEXPWM2_SM1CTRL2 = 0; FLEXPWM2_SM1CTRL = 0;
-FLEXPWM2_SM1VAL0  = 0; FLEXPWM2_SM1VAL1 = 0;
-FLEXPWM2_SM1VAL2  = 0; FLEXPWM2_SM1VAL3 = 0;
-FLEXPWM2_SM1VAL4  = 0; FLEXPWM2_SM1VAL5 = 0;
+// FLEXPWM1_SM3CTRL2 = 0; FLEXPWM1_SM3CTRL = 0;
+// FLEXPWM1_SM3VAL0  = 0; FLEXPWM1_SM3VAL1 = 0;
+// FLEXPWM1_SM3VAL2  = 0; FLEXPWM1_SM3VAL3 = 0;
+// FLEXPWM1_SM3VAL4  = 0; FLEXPWM1_SM3VAL5 = 0;
 
-FLEXPWM2_SM2CTRL2 = 0; FLEXPWM2_SM2CTRL = 0;
-FLEXPWM2_SM2VAL0  = 0; FLEXPWM2_SM2VAL1 = 0;
-FLEXPWM2_SM2VAL2  = 0; FLEXPWM2_SM2VAL3 = 0;
-FLEXPWM2_SM2VAL4  = 0; FLEXPWM2_SM2VAL5 = 0;
+// // FlexPWM2 — SM0 (pins 6, 9), SM1 (pin 35), SM2 (pins 26, 27), SM3 (NC)
+// FLEXPWM2_SM0CTRL2 = 0; FLEXPWM2_SM0CTRL = 0;
+// FLEXPWM2_SM0VAL0  = 0; FLEXPWM2_SM0VAL1 = 0;
+// FLEXPWM2_SM0VAL2  = 0; FLEXPWM2_SM0VAL3 = 0;
+// FLEXPWM2_SM0VAL4  = 0; FLEXPWM2_SM0VAL5 = 0;
 
-FLEXPWM2_SM3CTRL2 = 0; FLEXPWM2_SM3CTRL = 0;
-FLEXPWM2_SM3VAL0  = 0; FLEXPWM2_SM3VAL1 = 0;
-FLEXPWM2_SM3VAL2  = 0; FLEXPWM2_SM3VAL3 = 0;
-FLEXPWM2_SM3VAL4  = 0; FLEXPWM2_SM3VAL5 = 0;
+// FLEXPWM2_SM1CTRL2 = 0; FLEXPWM2_SM1CTRL = 0;
+// FLEXPWM2_SM1VAL0  = 0; FLEXPWM2_SM1VAL1 = 0;
+// FLEXPWM2_SM1VAL2  = 0; FLEXPWM2_SM1VAL3 = 0;
+// FLEXPWM2_SM1VAL4  = 0; FLEXPWM2_SM1VAL5 = 0;
 
-// FlexPWM3 — SM0 (pin 38), SM1 (pin 28), SM2, SM3
-FLEXPWM3_SM0CTRL2 = 0; FLEXPWM3_SM0CTRL = 0;
-FLEXPWM3_SM0VAL0  = 0; FLEXPWM3_SM0VAL1 = 0;
-FLEXPWM3_SM0VAL2  = 0; FLEXPWM3_SM0VAL3 = 0;
-FLEXPWM3_SM0VAL4  = 0; FLEXPWM3_SM0VAL5 = 0;
+// FLEXPWM2_SM2CTRL2 = 0; FLEXPWM2_SM2CTRL = 0;
+// FLEXPWM2_SM2VAL0  = 0; FLEXPWM2_SM2VAL1 = 0;
+// FLEXPWM2_SM2VAL2  = 0; FLEXPWM2_SM2VAL3 = 0;
+// FLEXPWM2_SM2VAL4  = 0; FLEXPWM2_SM2VAL5 = 0;
 
-FLEXPWM3_SM1CTRL2 = 0; FLEXPWM3_SM1CTRL = 0;
-FLEXPWM3_SM1VAL0  = 0; FLEXPWM3_SM1VAL1 = 0;
-FLEXPWM3_SM1VAL2  = 0; FLEXPWM3_SM1VAL3 = 0;
-FLEXPWM3_SM1VAL4  = 0; FLEXPWM3_SM1VAL5 = 0;
+// FLEXPWM2_SM3CTRL2 = 0; FLEXPWM2_SM3CTRL = 0;
+// FLEXPWM2_SM3VAL0  = 0; FLEXPWM2_SM3VAL1 = 0;
+// FLEXPWM2_SM3VAL2  = 0; FLEXPWM2_SM3VAL3 = 0;
+// FLEXPWM2_SM3VAL4  = 0; FLEXPWM2_SM3VAL5 = 0;
 
-FLEXPWM3_SM2CTRL2 = 0; FLEXPWM3_SM2CTRL = 0;
-FLEXPWM3_SM2VAL0  = 0; FLEXPWM3_SM2VAL1 = 0;
-FLEXPWM3_SM2VAL2  = 0; FLEXPWM3_SM2VAL3 = 0;
-FLEXPWM3_SM2VAL4  = 0; FLEXPWM3_SM2VAL5 = 0;
+// // FlexPWM3 — SM0 (pin 38), SM1 (pin 28), SM2, SM3
+// FLEXPWM3_SM0CTRL2 = 0; FLEXPWM3_SM0CTRL = 0;
+// FLEXPWM3_SM0VAL0  = 0; FLEXPWM3_SM0VAL1 = 0;
+// FLEXPWM3_SM0VAL2  = 0; FLEXPWM3_SM0VAL3 = 0;
+// FLEXPWM3_SM0VAL4  = 0; FLEXPWM3_SM0VAL5 = 0;
 
-FLEXPWM3_SM3CTRL2 = 0; FLEXPWM3_SM3CTRL = 0;
-FLEXPWM3_SM3VAL0  = 0; FLEXPWM3_SM3VAL1 = 0;
-FLEXPWM3_SM3VAL2  = 0; FLEXPWM3_SM3VAL3 = 0;
-FLEXPWM3_SM3VAL4  = 0; FLEXPWM3_SM3VAL5 = 0;
+// FLEXPWM3_SM1CTRL2 = 0; FLEXPWM3_SM1CTRL = 0;
+// FLEXPWM3_SM1VAL0  = 0; FLEXPWM3_SM1VAL1 = 0;
+// FLEXPWM3_SM1VAL2  = 0; FLEXPWM3_SM1VAL3 = 0;
+// FLEXPWM3_SM1VAL4  = 0; FLEXPWM3_SM1VAL5 = 0;
 
-// FlexPWM4 — SM0 (pin 22 A, pin 23 B ← PPM), SM1, SM2, SM3
-FLEXPWM4_SM0CTRL2 = 0; FLEXPWM4_SM0CTRL = 0;
-FLEXPWM4_SM0VAL0  = 0; FLEXPWM4_SM0VAL1 = 0;
-FLEXPWM4_SM0VAL2  = 0; FLEXPWM4_SM0VAL3 = 0;
-FLEXPWM4_SM0VAL4  = 0; FLEXPWM4_SM0VAL5 = 0;
+// FLEXPWM3_SM2CTRL2 = 0; FLEXPWM3_SM2CTRL = 0;
+// FLEXPWM3_SM2VAL0  = 0; FLEXPWM3_SM2VAL1 = 0;
+// FLEXPWM3_SM2VAL2  = 0; FLEXPWM3_SM2VAL3 = 0;
+// FLEXPWM3_SM2VAL4  = 0; FLEXPWM3_SM2VAL5 = 0;
 
-FLEXPWM4_SM1CTRL2 = 0; FLEXPWM4_SM1CTRL = 0;
-FLEXPWM4_SM1VAL0  = 0; FLEXPWM4_SM1VAL1 = 0;
-FLEXPWM4_SM1VAL2  = 0; FLEXPWM4_SM1VAL3 = 0;
-FLEXPWM4_SM1VAL4  = 0; FLEXPWM4_SM1VAL5 = 0;
+// FLEXPWM3_SM3CTRL2 = 0; FLEXPWM3_SM3CTRL = 0;
+// FLEXPWM3_SM3VAL0  = 0; FLEXPWM3_SM3VAL1 = 0;
+// FLEXPWM3_SM3VAL2  = 0; FLEXPWM3_SM3VAL3 = 0;
+// FLEXPWM3_SM3VAL4  = 0; FLEXPWM3_SM3VAL5 = 0;
 
-FLEXPWM4_SM2CTRL2 = 0; FLEXPWM4_SM2CTRL = 0;
-FLEXPWM4_SM2VAL0  = 0; FLEXPWM4_SM2VAL1 = 0;
-FLEXPWM4_SM2VAL2  = 0; FLEXPWM4_SM2VAL3 = 0;
-FLEXPWM4_SM2VAL4  = 0; FLEXPWM4_SM2VAL5 = 0;
+// // FlexPWM4 — SM0 (pin 22 A, pin 23 B ← PPM), SM1, SM2, SM3
+// FLEXPWM4_SM0CTRL2 = 0; FLEXPWM4_SM0CTRL = 0;
+// FLEXPWM4_SM0VAL0  = 0; FLEXPWM4_SM0VAL1 = 0;
+// FLEXPWM4_SM0VAL2  = 0; FLEXPWM4_SM0VAL3 = 0;
+// FLEXPWM4_SM0VAL4  = 0; FLEXPWM4_SM0VAL5 = 0;
 
-FLEXPWM4_SM3CTRL2 = 0; FLEXPWM4_SM3CTRL = 0;
-FLEXPWM4_SM3VAL0  = 0; FLEXPWM4_SM3VAL1 = 0;
-FLEXPWM4_SM3VAL2  = 0; FLEXPWM4_SM3VAL3 = 0;
-FLEXPWM4_SM3VAL4  = 0; FLEXPWM4_SM3VAL5 = 0;
+// FLEXPWM4_SM1CTRL2 = 0; FLEXPWM4_SM1CTRL = 0;
+// FLEXPWM4_SM1VAL0  = 0; FLEXPWM4_SM1VAL1 = 0;
+// FLEXPWM4_SM1VAL2  = 0; FLEXPWM4_SM1VAL3 = 0;
+// FLEXPWM4_SM1VAL4  = 0; FLEXPWM4_SM1VAL5 = 0;
 
-// ── Step 3: Force IOMUXC pad mux to ALT5 (GPIO) for all affected pins ──
-// Motor output pins (pins 0-5)
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_03 = 5; // pin 0  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_02 = 5; // pin 1  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_04   = 5; // pin 2  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_05   = 5; // pin 3  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_06   = 5; // pin 4  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_08   = 5; // pin 5  → GPIO
+// FLEXPWM4_SM2CTRL2 = 0; FLEXPWM4_SM2CTRL = 0;
+// FLEXPWM4_SM2VAL0  = 0; FLEXPWM4_SM2VAL1 = 0;
+// FLEXPWM4_SM2VAL2  = 0; FLEXPWM4_SM2VAL3 = 0;
+// FLEXPWM4_SM2VAL4  = 0; FLEXPWM4_SM2VAL5 = 0;
 
-// Wire1 pins (16=SDA1, 17=SCL1) — both are FlexPWM2 SM2
-// Safe to reset to GPIO here because Wire1.begin() in monitorIMUinit()
-// will correctly re-mux them to ALT2 (I2C) when called later in setup().
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_07 = 5; // pin 16 → GPIO (Wire1 SDA1)
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_06 = 5; // pin 17 → GPIO (Wire1 SCL1)
-pinMode(16, INPUT);
-pinMode(17, INPUT);
+// FLEXPWM4_SM3CTRL2 = 0; FLEXPWM4_SM3CTRL = 0;
+// FLEXPWM4_SM3VAL0  = 0; FLEXPWM4_SM3VAL1 = 0;
+// FLEXPWM4_SM3VAL2  = 0; FLEXPWM4_SM3VAL3 = 0;
+// FLEXPWM4_SM3VAL4  = 0; FLEXPWM4_SM3VAL5 = 0;
 
-// Servo output pins (pins 6-9)
-IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_10    = 5; // pin 6  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_01    = 5; // pin 7  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_00    = 5; // pin 8  → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_11    = 5; // pin 9  → GPIO
+// // ── Step 3: Force IOMUXC pad mux to ALT5 (GPIO) for all affected pins ──
+// // Motor output pins (pins 0-5)
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_03 = 5; // pin 0  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_02 = 5; // pin 1  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_04   = 5; // pin 2  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_05   = 5; // pin 3  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_06   = 5; // pin 4  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_08   = 5; // pin 5  → GPIO
 
-// Former PWM passthrough / PPM adjacent pins (pins 15, 20-23)
-// NOTE: pins 16 (SDA1) and 17 (SCL1) are Wire1 I2C — skipped intentionally
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_03 = 5; // pin 15 → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_10 = 5; // pin 20 → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_11 = 5; // pin 21 → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_08 = 5; // pin 22 → GPIO
-IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_09 = 5; // pin 23 → GPIO  ← PPM pin
+// // Wire1 pins (16=SDA1, 17=SCL1) — both are FlexPWM2 SM2
+// // Safe to reset to GPIO here because Wire1.begin() in monitorIMUinit()
+// // will correctly re-mux them to ALT2 (I2C) when called later in setup().
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_07 = 5; // pin 16 → GPIO (Wire1 SDA1)
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_06 = 5; // pin 17 → GPIO (Wire1 SCL1)
+// pinMode(16, INPUT);
+// pinMode(17, INPUT);
 
-// ── Step 4: Set all released pins to INPUT ────────────────────
-// Motor/ESC pins set to INPUT temporarily — setup() will reassign them
-// correctly via pinMode(OUTPUT) or PWMServo.attach() immediately after
-// this block.
-pinMode(0,  INPUT); pinMode(1,  INPUT);
-pinMode(2,  INPUT); pinMode(3,  INPUT);
-pinMode(4,  INPUT); pinMode(5,  INPUT);
-pinMode(6,  INPUT); pinMode(7,  INPUT);
-pinMode(8,  INPUT); pinMode(9,  INPUT);
-pinMode(15, INPUT);
-pinMode(20, INPUT); pinMode(21, INPUT);
-pinMode(22, INPUT); pinMode(23, INPUT);
+// // Servo output pins (pins 6-9)
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_10    = 5; // pin 6  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_01    = 5; // pin 7  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_B1_00    = 5; // pin 8  → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_11    = 5; // pin 9  → GPIO
 
-delayMicroseconds(100); // brief settle before any peripheral re-init
+// // Former PWM passthrough / PPM adjacent pins (pins 15, 20-23)
+// // NOTE: pins 16 (SDA1) and 17 (SCL1) are Wire1 I2C — skipped intentionally
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_03 = 5; // pin 15 → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_10 = 5; // pin 20 → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_11 = 5; // pin 21 → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_08 = 5; // pin 22 → GPIO
+// IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_09 = 5; // pin 23 → GPIO  ← PPM pin
+
+// // ── Step 4: Set all released pins to INPUT ────────────────────
+// // Motor/ESC pins set to INPUT temporarily — setup() will reassign them
+// // correctly via pinMode(OUTPUT) or PWMServo.attach() immediately after
+// // this block.
+// pinMode(0,  INPUT); pinMode(1,  INPUT);
+// pinMode(2,  INPUT); pinMode(3,  INPUT);
+// pinMode(4,  INPUT); pinMode(5,  INPUT);
+// pinMode(6,  INPUT); pinMode(7,  INPUT);
+// pinMode(8,  INPUT); pinMode(9,  INPUT);
+// pinMode(15, INPUT);
+// pinMode(20, INPUT); pinMode(21, INPUT);
+// pinMode(22, INPUT); pinMode(23, INPUT);
+
+// delayMicroseconds(100); // brief settle before any peripheral re-init
 
 // ── End FlexPWM full reset ────────────────────────────────────
 
@@ -675,7 +681,7 @@ delayMicroseconds(100); // brief settle before any peripheral re-init
   motor4_esc.write(0);
   motor5_esc.write(0);
   motor6_esc.write(0);
-  delay(20); // ESCs typically need ~2 seconds of minimum throttle to arm (for safety reason), keep at 20ms for flight responsiveness
+  delay(2000); // ESCs typically need ~2 seconds of minimum throttle to arm (for safety reason), keep at 20ms for flight responsiveness
 #endif
 
   //Indicate entering main loop with 3 quick blinks
@@ -856,7 +862,7 @@ void loop() {
   loopBlink(); //Indicate we are in main loop with short blink every 1.5 seconds
 
   //Print data at 100hz (uncomment one at a time for troubleshooting) - SELECT ONE:
-  printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
+  // printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
   //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
   //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
   //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
@@ -979,8 +985,8 @@ void controlMixer() {
   /* for easier motor placement setup, make sure to fit and reference
   *the position of the propellers from the top of the vehicle, facing forward
   *and adjust the motor direction accordingly by their ESCs.
-  *Props in (rotation cancels inward instead of outward) is preferrable for default mix
-  *additionally might improve circulation cooling on open circuit assembly
+  *Props out (rotation cancels outward instead of inward) is implemented as default mix
+  *additionally might improve clearance for landing and keeps dust or debris away from mainboard 
   */
   
   /* ========================================
@@ -993,11 +999,14 @@ void controlMixer() {
 * Pitch (+)       |   -    |   -    |   +    |   +    | Nose up (backward)
 * Roll (+)        |   +    |   -    |   -    |   +    | Roll right
 * Roll (-)        |   -    |   +    |   +    |   -    | Roll left
-* Yaw (+)         |   +    |   -    |   +    |   -    | Yaw right (CW)
-* Yaw (-)         |   -    |   +    |   -    |   +    | Yaw left (CCW)
+* Yaw (+)         |   +    |   -    |   +    |   -    | Yaw left (CCW)
+* Yaw (-)         |   -    |   +    |   -    |   +    | Yaw right (CW)
    ========================================
 * Physics Principle: Each control axis creates differential thrust
 * to generate desired moments while maintaining total thrust balance
+* yaw however, resulting force of the dominant rotational propeller or the diagonals will results the frame to yaw the opposite of the direction of the dominant rotational propeller
+* (+CW+CW) = yaw left (CCW)
+* (-CCW-CCW) = yaw right (CW)
    ========================================
   */
   m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front Left (CW)
@@ -1015,13 +1024,16 @@ void controlMixer() {
   s5_command_scaled = 0;
   s6_command_scaled = 0;
   s7_command_scaled = 0;
- 
 }
 
 void armedStatus() {
-  //DESCRIPTION: Check if the throttle cut is off and the throttle input is low to prepare for flight.
+  // Arm condition: CH5 low AND throttle at minimum
   if ((channel_5_pwm < 1500) && (channel_1_pwm < 1050)) {
     armedFly = true;
+  }
+  // Explicit disarm: CH5 goes high (pilot command) — belt and suspenders with throttleCut()
+  if (channel_5_pwm > 1500) {
+    armedFly = false;
   }
 }
 
@@ -2208,24 +2220,37 @@ void throttleCut() {
   //DESCRIPTION: Directly set actuator outputs to minimum value if triggered
   /*
       Monitors the state of radio command channel_5_pwm and directly sets the mx_command_PWM values to minimum (120 is
-      minimum for oneshot125 protocol, 0 is minimum for standard PWM servo library used) if channel 5 is high. This is the last function
+      minimum for oneshot125 protocol, 1000 is minimum for standard PWM servo library used) if channel 5 is high. This is the last function
       called before commandMotors() is called so that the last thing checked is if the user is giving permission to command
       the motors to anything other than minimum value. Safety first.
 
-      channel_5_pwm is LOW then throttle cut is OFF and throttle value can change. (ThrottleCut is DEACTIVATED)
-      channel_5_pwm is HIGH then throttle cut is ON and throttle value = 120 only. (ThrottleCut is ACTIVATED), (drone is DISARMED)
+      channel_5_pwm is LOW then throttle cut is OFF and throttle value can change. (ThrottleCut is DEACTIVATED), (drone is ARMED)
+      channel_5_pwm is HIGH then throttle cut is ON and throttle value = 1000 only. (ThrottleCut is ACTIVATED), (drone is DISARMED)
+
+      MODIFIED for SimonK ESC strict arming: Continuous 1000 PWM signal sent during:
+      1. Startup (armedFly == false)
+      2. Whenever throttle cut is engaged (channel_5_pwm > 1500)
+      This ensures proper ESC initialization and arming sequence.
   */
-  if ((channel_5_pwm > 1500) || (armedFly == false)) {
-    armedFly = false;
+
+  // Check if throttle cut is engaged OR system is not yet armed
+  // This ensures 1000 PWM is sent continuously from startup until throttle cut is explicitly disengaged
+  bool throttleCutEngaged = (channel_5_pwm > 1500);
+  bool systemNotArmed = (armedFly == false);
+
+  if (throttleCutEngaged || systemNotArmed) {
+
+    // Send continuous 1000 PWM signal for SimonK ESC arming
+    // This is critical for ESCs that require sustained low throttle signal to arm properly
 #if defined USE_ONESHOT125_ESC
-    m1_command_PWM = 120; // OneShot125 minimum
-    m2_command_PWM = 120;
-    m3_command_PWM = 120;
-    m4_command_PWM = 120;
-    m5_command_PWM = 120;
-    m6_command_PWM = 120;
+    m1_command_PWM = 125; // OneShot125 minimum (increased from 120 for better compatibility)
+    m2_command_PWM = 125;
+    m3_command_PWM = 125;
+    m4_command_PWM = 125;
+    m5_command_PWM = 125;
+    m6_command_PWM = 125;
 #else
-    m1_command_PWM = 1000; // Standard PWM minimum
+    m1_command_PWM = 1000; // Standard PWM minimum - continuous for SimonK ESC arming
     m2_command_PWM = 1000;
     m3_command_PWM = 1000;
     m4_command_PWM = 1000;
@@ -2233,14 +2258,24 @@ void throttleCut() {
     m6_command_PWM = 1000;
 #endif
 
+    // Reset scaled commands to ensure no residual throttle values
+    m1_command_scaled = 0;
+    m2_command_scaled = 0;
+    m3_command_scaled = 0;
+    m4_command_scaled = 0;
+    m5_command_scaled = 0;
+    m6_command_scaled = 0;
+
     //Uncomment if using servo PWM variables to control motor ESCs
-    //s1_command_PWM = 0;
-    //s2_command_PWM = 0;
-    //s3_command_PWM = 0;
-    //s4_command_PWM = 0;
-    //s5_command_PWM = 0;
-    //s6_command_PWM = 0;
-    //s7_command_PWM = 0;
+    //s1_command_PWM = 1000;
+    //s2_command_PWM = 1000;
+    //s3_command_PWM = 1000;
+    //s4_command_PWM = 1000;
+    //s5_command_PWM = 1000;
+    //s6_command_PWM = 1000;
+    //s7_command_PWM = 1000;
+
+    return;
   }
 }
 
