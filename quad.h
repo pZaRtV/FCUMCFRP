@@ -25,8 +25,11 @@
 // Select ONE primary IMU (used by control loop):
 #define USE_MPU6050_I2C
 // #define USE_MPU9250_SPI
+// #define USE_ICM20948_I2C
 
+// select one Monitor IMU
 // #define USE_MPU9250_MONITOR_I2C
+#define USE_ICM20948_MONITOR_I2C
 
 // Ethernet/W5500 Configuration for UDP telemetry
 #define W5500_CS_PIN 10
@@ -41,6 +44,8 @@
 
 #define USE_MONITOR_ATTITUDE_COMPARISON
 
+#define B_MADGWICK_MONITOR 0.041f
+
 // Select ONE full scale gyro range (deg/sec):
 #define GYRO_250DPS
 // #define GYRO_500DPS
@@ -54,6 +59,8 @@
 // #define ACCEL_16G
 
 // #define USE_ONESHOT125_ESC
+
+// #define USE_MANEUVER_SEQUENCE  // uncomment for maneuver sorties
 
 // PPM channel mapping (logical -> physical PPM slot, 1-based)
 // CH1=Throttle, CH2=Aileron, CH3=Elevator, CH4=Rudder, CH5=Gear, CH6=Aux1
@@ -165,8 +172,12 @@
 #error "You must define exactly one receiver type in quad.h."
 #endif
 
-#if (defined(USE_MPU6050_I2C) + defined(USE_MPU9250_SPI)) != 1
-#error "You must define exactly one IMU in quad.h."
+#if (defined(USE_MPU6050_I2C) + defined(USE_MPU9250_SPI) + defined(USE_ICM20948_I2C)) != 1
+#error "You must define exactly one main control IMU in quad.h."
+#endif
+
+#if (defined(USE_MPU9250_MONITOR_I2C) + defined(USE_ICM20948_MONITOR_I2C)) != 1
+#error "You must define exactly one monitor IMU in quad.h."
 #endif
 
 #if (defined(GYRO_250DPS) + defined(GYRO_500DPS) + defined(GYRO_1000DPS) + defined(GYRO_2000DPS)) != 1
