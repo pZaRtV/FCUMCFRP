@@ -1,8 +1,8 @@
 //FCU Madgwick Control Filter Research Platform
 //Author: Patrick Andrasena T.
 //Project Start: 1/06/2025
-//Last Updated: 4/14/2026
-//Version: B-1.4.6
+//Last Updated: 5/15/2026
+//Version: B-1.5.1
 
 //Project's base: 
 //Arduino/Teensy Flight Controller - dRehmFlight
@@ -48,7 +48,7 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 #include <EthernetUdp.h> //UDP library for telemetry
 
 #if defined USE_SBUS_RX
-  #include "src/SBUS/SBUS.h"   //sBus interface
+  #include "src/SBUS/SBUS.h" 
 #endif
 
 #if defined USE_ELRS_RX
@@ -70,6 +70,9 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 #elif defined USE_MPU9250_SPI
   #include "src/MPU9250/MPU9250.h"
   MPU9250 mpu9250(SPI2,36);
+#elif defined USE_ICM20948_I2C
+  #include "src/ICM20948/ICM20948.h"
+  ICM20948 icm20948(Wire1);
 #else
   #error No primary IMU defined...
 #endif
@@ -81,10 +84,20 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
     // If MPU9250 is not the primary IMU, make sure the class is included
     #include "src/MPU9250/MPU9250.h"
   #endif
+  extern MPU9250 mpu9250_monitor;
+#endif
   // Wire1 is available from Wire.h on Teensy 4.0 (no separate Wire1.h needed)
   // Uses Wire1 (separate from Wire used by MPU6050) with I2C address 0x69
   // Wire1 clock speed set to 400kHz in monitorIMUinit() (separate from Wire at 1000kHz)
   // MPU9250 monitor object is declared in imuMonitor.ino to avoid redefinition
+#if defined USE_ICM20948_MONITOR_I2C
+  #ifndef USE_ICM20948_I2C
+    #include "src/ICM20948/ICM20948.h"
+  #endif
+  // ICM20948 as standalone choice to be toggleable between redundant to main control loop, or as monitor to the main control loop instead
+  extern ICM20948 icm20948_monitor(Wire1);
+#else
+  #error No Monitor IMU defined...
 #endif
 
 //========================================================================================================================//
@@ -110,6 +123,43 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
   #define ACCEL_FS_SEL_8     mpu9250.ACCEL_RANGE_8G
   #define ACCEL_FS_SEL_16    mpu9250.ACCEL_RANGE_16G
 #endif
+
+// IMU (ICM-20948) uses same range definitions as primary IMU
+#if defined USE_ICM20948_I2C
+  #define GYRO_FS_SEL_250    icm20948.GYRO_RANGE_250DPS
+  #define GYRO_FS_SEL_500    icm20948.GYRO_RANGE_500DPS
+  #define GYRO_FS_SEL_1000   icm20948.GYRO_RANGE_1000DPS
+  #define GYRO_FS_SEL_2000   icm20948.GYRO_RANGE_2000DPS
+  #define ACCEL_FS_SEL_2     icm20948.ACCEL_RANGE_2G
+  #define ACCEL_FS_SEL_4     icm20948.ACCEL_RANGE_4G
+  #define ACCEL_FS_SEL_8     icm20948.ACCEL_RANGE_8G
+  #define ACCEL_FS_SEL_16    icm20948.ACCEL_RANGE_16G
+#endif
+// same as monitor as well
+#if defined USE_ICM20948_MONITOR_I2C
+  #ifndef USE_ICM20948_I2C
+    // If monitor is separate from primary, define its range constants
+    #define GYRO_MON_FS_SEL_250    icm20948_monitor.GYRO_RANGE_250DPS
+    #define GYRO_MON_FS_SEL_500    icm20948_monitor.GYRO_RANGE_500DPS
+    #define GYRO_MON_FS_SEL_1000   icm20948_monitor.GYRO_RANGE_1000DPS
+    #define GYRO_MON_FS_SEL_2000   icm20948_monitor.GYRO_RANGE_2000DPS
+    #define ACCEL_MON_FS_SEL_2     icm20948_monitor.ACCEL_RANGE_2G
+    #define ACCEL_MON_FS_SEL_4     icm20948_monitor.ACCEL_RANGE_4G
+    #define ACCEL_MON_FS_SEL_8     icm20948_monitor.ACCEL_RANGE_8G
+    #define ACCEL_MON_FS_SEL_16    icm20948_monitor.ACCEL_RANGE_16G
+  #else
+    // for primary also the same
+    #define GYRO_MON_FS_SEL_250    GYRO_FS_SEL_250
+    #define GYRO_MON_FS_SEL_500    GYRO_FS_SEL_500
+    #define GYRO_MON_FS_SEL_1000   GYRO_FS_SEL_1000
+    #define GYRO_MON_FS_SEL_2000   GYRO_FS_SEL_2000
+    #define ACCEL_MON_FS_SEL_2     ACCEL_FS_SEL_2
+    #define ACCEL_MON_FS_SEL_4     ACCEL_FS_SEL_4
+    #define ACCEL_MON_FS_SEL_8     ACCEL_FS_SEL_8
+    #define ACCEL_MON_FS_SEL_16    ACCEL_FS_SEL_16
+  #endif
+#endif
+
 
 // Monitor IMU (MPU9250) uses same range definitions as primary IMU
 #if defined USE_MPU9250_MONITOR_I2C
@@ -188,14 +238,14 @@ float B_mag = 1.0;        //Magnetometer LP filter parameter
 
 // Main IMU (MPU6050) calibration parameters - calibrate using calculate_IMU_error_main() in void setup()
 // These are used for the primary flight control IMU
-float AccErrorX_main = 0.0;
-float AccErrorY_main = 0.0;
-float AccErrorZ_main = 0.0;
-float GyroErrorX_main = 0.0;
-float GyroErrorY_main = 0.0;
-float GyroErrorZ_main = 0.0;
+float AccErrorX_main = 0.11;
+float AccErrorY_main = 0.12;
+float AccErrorZ_main = -0.00;
+float GyroErrorX_main = -3.96;
+float GyroErrorY_main = -2.43;
+float GyroErrorZ_main = 0.35;
 
-// Monitor IMU (MPU9250) calibration parameters - calibrate using calculate_IMU_error_monitor() in void setup()
+// Monitor IMU (MPU9250/ICM20948) calibration parameters - calibrate using calculate_IMU_error_monitor() in void setup()
 // These are used for the independent validation/monitor IMU
 float AccErrorX_mon = 0.0;
 float AccErrorY_mon = 0.0;
@@ -328,8 +378,8 @@ float q1 = 0.0f;
 float q2 = 0.0f;
 float q3 = 0.0f;
 
-// Optional secondary IMU monitor variables (MPU9250 over I2C Wire1)
-#if defined USE_MPU9250_MONITOR_I2C
+// Optional secondary IMU monitor variables (MPU9250/ICM20948 over I2C Wire1)
+#if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
 float AccX_mon, AccY_mon, AccZ_mon;
 float AccX_mon_prev, AccY_mon_prev, AccZ_mon_prev;
 float GyroX_mon, GyroY_mon, GyroZ_mon;
@@ -356,6 +406,8 @@ extern volatile unsigned long ppm_isr_count; // Debug counter
 // Monitor IMU object declaration (declared in imuMonitor.ino)
 #if defined USE_MPU9250_MONITOR_I2C
   extern MPU9250 mpu9250_monitor;
+#elif defined USE_ICM20948_MONITOR_I2C
+  extern ICM20948 icm20948_monitor;
 #endif
 
 //Normalized desired state:
@@ -648,7 +700,7 @@ void setup() {
 
   // Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   // calculate_IMU_error_main(); //Calibration parameters printed to serial monitor for MAIN IMU. Paste these in the user specified variables section, then comment this out forever.
-  // calculate_IMU_error_monitor(); //Calibration parameters printed to serial monitor for MONITOR IMU. Paste these in the user specified variables section, then comment this out forever.
+  calculate_IMU_error_monitor(); //Calibration parameters printed to serial monitor for MONITOR IMU. Paste these in the user specified variables section, then comment this out forever.
 
   //Arm servo channels
   servo1.write(0); //Command servo angle from 0-180 degrees (1000 to 2000 PWM)
@@ -661,7 +713,26 @@ void setup() {
   
   delay(5);
 
-  //calibrateESCs(); //PROPS OFF. Uncomment this to calibrate your ESCs by setting throttle stick to max, powering on, and lowering throttle to zero after the beeps
+  // calibrateESCs(); //PROPS OFF. Uncomment this to calibrate your ESCs by setting throttle stick to max, powering on, and lowering throttle to zero after the beeps
+/*
+Full ESC Calibration Guide:
+
+Step 1 — In setup(), uncomment calibrateESCs():
+  calibrateESCs();
+
+Step 2 — Flash the firmware
+
+Step 3 — With ESCs powered off and props off:
+  Raise throttle stick to maximum (CH1 = 2000)
+  Power on ESCs
+  Wait for startup beeps
+  Lower throttle stick to minimum (CH1 = 1000)
+  Wait for confirmation beeps — ESCs now calibrated
+
+Step 4 — Power off ESCs
+Step 5 — Comment out calibrateESCs() again
+Step 6 — Reflash
+*/
   //Code will not proceed past here if this function is uncommented!
 
 #if defined USE_ONESHOT125_ESC
@@ -896,6 +967,9 @@ void loop() {
     getIMUdataMonitor(); // Read and filter monitor IMU sensor data
     // Always compute monitor attitude for UDP telemetry (both raw sensors and attitude are sent)
     MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, -AccX_mon, AccY_mon, AccZ_mon, MagY_mon, -MagX_mon, MagZ_mon, dt);
+  #elif defined USE_ICM20948_MONITOR_I2C
+    getIMUdataMonitor();
+    MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, -AccX_mon, AccY_mon, AccZ_mon, MagY_mon, -MagX_mon, MagZ_mon, dt);
     #if defined USE_MONITOR_ATTITUDE_COMPARISON
       // Compare attitude angles: Control IMU (MPU6050) vs Monitor IMU (MPU9250)
       compareAttitude(); // Compare control IMU attitude vs monitor IMU attitude (roll_error_mon, pitch_error_mon, yaw_error_mon)
@@ -1080,10 +1154,31 @@ void IMUinit() {
     mpu9250.setMagCalY(MagErrorY, MagScaleY);
     mpu9250.setMagCalZ(MagErrorZ, MagScaleZ);
     mpu9250.setSrd(0); //sets gyro and accel read to 1khz, magnetometer read to 100hz
+
+  #elif defined USE_ICM20948_I2C
+    int status = icm20948.begin();
+
+    if (status < 0) {
+      Serial.println("icm20948 initialization unsuccessful");
+      Serial.println("Check icm20948 wiring or try cycling power");
+      Serial.print("Status: ");
+      Serial.println(status);
+      while(1) {}
+    }
+// still tentative for ICM20948, so still handled the same as mpu9250
+    icm20948.setGyroRange(GYRO_SCALE);
+    icm20948.setAccelRange(ACCEL_SCALE);
+    icm20948.setMagCalX(MagErrorX, MagScaleX);
+    icm20948.setMagCalY(MagErrorY, MagScaleY);
+    icm20948.setMagCalZ(MagErrorZ, MagScaleZ);
+    icm20948.setSrd(0); //sets gyro and accel read to 1khz, magnetometer read to 100hz
   #endif
 
   // Initialize optional secondary MPU9250 monitor (I2C Wire1) for ground-truth attitude
   #if defined USE_MPU9250_MONITOR_I2C
+    monitorIMUinit();
+  // also the same for ICM20948
+  #elif defined USE_ICM20948_MONITOR_I2C
     monitorIMUinit();
   #endif
 }
@@ -1101,12 +1196,16 @@ void getIMUdata() {
   int16_t AcX,AcY,AcZ,GyX,GyY,GyZ;
   #if defined USE_MPU9250_SPI
     int16_t MgX,MgY,MgZ;
+  #elif defined USE_ICM20948_I2C
+    int16_t MgX,MgY,MgZ;
   #endif
 
   #if defined USE_MPU6050_I2C
     mpu6050.getMotion6(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ);
   #elif defined USE_MPU9250_SPI
     mpu9250.getMotion9(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ, &MgX, &MgY, &MgZ);
+  #elif defined USE_ICM20948_I2C
+    icm20948.getMotion9(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ, &MgX, &MgY, &MgZ)
   #endif
 
   //Accelerometer
@@ -1141,7 +1240,7 @@ void getIMUdata() {
   GyroY_prev = GyroY;
   GyroZ_prev = GyroZ;
 
-  //Magnetometer (only for MPU9250)
+  //Magnetometer (for MPU9250)
   #if defined USE_MPU9250_SPI
     MagX = MgX/6.0; //uT
     MagY = MgY/6.0;
@@ -1157,6 +1256,24 @@ void getIMUdata() {
     MagX_prev = MagX;
     MagY_prev = MagY;
     MagZ_prev = MagZ;
+
+  //Magnetometer (for ICM20948)
+  #elif defined USE_ICM20948_I2C
+    MagX = MgX/6.0; //uT
+    MagY = MgY/6.0;
+    MagZ = MgZ/6.0;
+    //Correct the outputs with the calculated error values
+    MagX = (MagX - MagErrorX)*MagScaleX;
+    MagY = (MagY - MagErrorY)*MagScaleY;
+    MagZ = (MagZ - MagErrorZ)*MagScaleZ;
+    //LP filter magnetometer data
+    MagX = (1.0 - B_mag)*MagX_prev + B_mag*MagX;
+    MagY = (1.0 - B_mag)*MagY_prev + B_mag*MagY;
+    MagZ = (1.0 - B_mag)*MagZ_prev + B_mag*MagZ;
+    MagX_prev = MagX;
+    MagY_prev = MagY;
+    MagZ_prev = MagZ;
+
   #else
     // MPU6050 doesn't have magnetometer, set to zero
     MagX = 0.0;
@@ -1176,6 +1293,8 @@ void calculate_IMU_error_main() {
   int16_t AcX,AcY,AcZ,GyX,GyY,GyZ;
   #if defined USE_MPU9250_SPI
     int16_t MgX,MgY,MgZ;
+  #elif defined USE_ICM20948_I2C
+    int16_t MgX,MgY,MgZ;
   #endif
   AccErrorX_main = 0.0;
   AccErrorY_main = 0.0;
@@ -1191,6 +1310,8 @@ void calculate_IMU_error_main() {
       mpu6050.getMotion6(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ);
     #elif defined USE_MPU9250_SPI
       mpu9250.getMotion9(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ, &MgX, &MgY, &MgZ);
+    #elif defined USE_ICM20948_I2C
+      icm20948.getMotion9(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ, &MgX, &MgY, &MgZ);
     #endif
     
     AccX  = AcX / ACCEL_SCALE_FACTOR;
@@ -1254,7 +1375,7 @@ void calculate_IMU_error_monitor() {
    * This is part of the calibration process for the MONITOR IMU used for validation.
    */
   
-  #if defined USE_MPU9250_MONITOR_I2C
+  #if defined USE_MPU9250_MONITOR_I2C 
     int16_t AcX_mon, AcY_mon, AcZ_mon, GyX_mon, GyY_mon, GyZ_mon;
     
     AccErrorX_mon = 0.0;
@@ -1279,6 +1400,45 @@ void calculate_IMU_error_monitor() {
       GyX_mon = mpu9250_monitor.getGyroX_rads() * 57.29577951f; // Convert to deg/s
       GyY_mon = mpu9250_monitor.getGyroY_rads() * 57.29577951f;
       GyZ_mon = mpu9250_monitor.getGyroZ_rads() * 57.29577951f;
+      
+      //Sum all readings for MONITOR IMU
+      AccErrorX_mon  = AccErrorX_mon + AcX_mon;
+      AccErrorY_mon  = AccErrorY_mon + AcY_mon;
+      AccErrorZ_mon  = AccErrorZ_mon + AcZ_mon;
+      GyroErrorX_mon = GyroErrorX_mon + GyX_mon;
+      GyroErrorY_mon = GyroErrorY_mon + GyY_mon;
+      GyroErrorZ_mon = GyroErrorZ_mon + GyZ_mon;
+      c++;
+      
+      if (c % 1000 == 0) {
+        Serial.print(".");
+      }
+
+  #if defined defined USE_ICM20948_MONITOR_I2C
+      int16_t AcX_mon, AcY_mon, AcZ_mon, GyX_mon, GyY_mon, GyZ_mon;
+    
+    AccErrorX_mon = 0.0;
+    AccErrorY_mon = 0.0;
+    AccErrorZ_mon = 0.0;
+    GyroErrorX_mon = 0.0;
+    GyroErrorY_mon = 0.0;
+    GyroErrorZ_mon = 0.0;
+    
+    Serial.println("Starting MONITOR IMU calibration...");
+    Serial.println("Keep vehicle level and still for 10 seconds...");
+    
+    //Read monitor IMU values 10000 times (shorter than main IMU for efficiency)
+    int c = 0;
+    while (c < 10000) {
+      icm20948_monitor.readSensor();
+      
+      // Get raw accelerometer and gyro data from monitor IMU
+      AcX_mon = icm20948_monitor.getAccelX_mss() * 1000.0f / 9.807f; // Convert to mg for consistency
+      AcY_mon = icm20948_monitor.getAccelY_mss() * 1000.0f / 9.807f;
+      AcZ_mon = icm20948_monitor.getAccelZ_mss() * 1000.0f / 9.807f;
+      GyX_mon = icm20948_monitor.getGyroX_rads() * 57.29577951f; // Convert to deg/s
+      GyY_mon = icm20948_monitor.getGyroY_rads() * 57.29577951f;
+      GyZ_mon = icm20948_monitor.getGyroZ_rads() * 57.29577951f;
       
       //Sum all readings for MONITOR IMU
       AccErrorX_mon  = AccErrorX_mon + AcX_mon;
@@ -1968,6 +2128,10 @@ void getCommands() {
   channel_2_pwm_prev = channel_2_pwm;
   channel_3_pwm_prev = channel_3_pwm;
   channel_4_pwm_prev = channel_4_pwm;
+
+  #if defined USE_MANEUVER_SEQUENCE
+  injectManeuverSequence();  // overrides channel_N_pwm
+#endif
 }
 
 void failSafe() {
@@ -2285,6 +2449,8 @@ void calibrateMagnetometer() {
    * This function supports magnetometer calibration for:
    * 1. Main IMU (MPU9250 via SPI) - when USE_MPU9250_SPI is defined
    * 2. Monitor IMU (MPU9250 via I2C) - when USE_MPU9250_MONITOR_I2C is defined
+   * 3. Main IMU (ICM20948 via I2C) - when USE_ICM20948_I2C is defined
+   * 4. Monitor IMU (ICM20948 via I2C) - when USE_ICM20948_MONITOR_I2C is defined
    * The calibration process generates bias and scale factors that should be copied
    * to the magnetometer calibration parameters in the user variables section.
    */
@@ -2375,10 +2541,96 @@ void calibrateMagnetometer() {
     }
   
     while(1); //Halt code so it won't enter main loop until this function commented out
+  
+    //for ICM20948 Upgrade
+  #elif defined USE_ICM20948_I2C
+    float success;
+    Serial.println("Beginning MAIN IMU (SPI) magnetometer calibration in");
+    Serial.println("3...");
+    delay(1000);
+    Serial.println("2...");
+    delay(1000);
+    Serial.println("1...");
+    delay(1000);
+    Serial.println("Rotate the MAIN IMU about all axes until complete.");
+    Serial.println(" ");
+    success =  icm20948.calibrateMag();
+    if(success) {
+      Serial.println("MAIN IMU Calibration Successful!");
+      Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
+      Serial.print("float MagErrorX = ");
+      Serial.print(icm20948.getMagBiasX_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorY = ");
+      Serial.print(icm20948.getMagBiasY_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorZ = ");
+      Serial.print(icm20948.getMagBiasZ_uT());
+      Serial.println(";");
+      Serial.print("float MagScaleX = ");
+      Serial.print(icm20948.getMagScaleFactorX());
+      Serial.println(";");
+      Serial.print("float MagScaleY = ");
+      Serial.print(icm20948.getMagScaleFactorY());
+      Serial.println(";");
+      Serial.print("float MagScaleZ = ");
+      Serial.print(icm20948.getMagScaleFactorZ());
+      Serial.println(";");
+      Serial.println(" ");
+      Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
+    }
+    else {
+      Serial.println("MAIN IMU Calibration Unsuccessful. Please reset the board and try again.");
+    }
+  
+    while(1); //Halt code so it won't enter main loop until this function commented out
     
+  #elif defined USE_ICM20948_MONITOR_I2C
+    float success;
+    Serial.println("Beginning MONITOR IMU (I2C Wire1) magnetometer calibration in");
+    Serial.println("3...");
+    delay(1000);
+    Serial.println("2...");
+    delay(1000);
+    Serial.println("1...");
+    delay(1000);
+    Serial.println("Rotate the MONITOR IMU about all axes until complete.");
+    Serial.println(" ");
+    success = icm20948_monitor.calibrateMag();
+    if(success) {
+      Serial.println("MONITOR IMU Calibration Successful!");
+      Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
+      Serial.print("float MagErrorX = ");
+      Serial.print(icm20948_monitor.getMagBiasX_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorY = ");
+      Serial.print(icm20948_monitor.getMagBiasY_uT());
+      Serial.println(";");
+      Serial.print("float MagErrorZ = ");
+      Serial.print(icm20948_monitor.getMagBiasZ_uT());
+      Serial.println(";");
+      Serial.print("float MagScaleX = ");
+      Serial.print(icm20948_monitor.getMagScaleFactorX());
+      Serial.println(";");
+      Serial.print("float MagScaleY = ");
+      Serial.print(icm20948_monitor.getMagScaleFactorY());
+      Serial.println(";");
+      Serial.print("float MagScaleZ = ");
+      Serial.print(icm20948_monitor.getMagScaleFactorZ());
+      Serial.println(";");
+      Serial.println(" ");
+      Serial.println("These magnetometer calibration parameters are shared between main and monitor IMUs if both use MPU9250.");
+      Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
+    }
+    else {
+      Serial.println("MONITOR IMU Calibration Unsuccessful. Please reset the board and try again.");
+    }
+  
+    while(1); //Halt code so it won't enter main loop until this function commented out
+
   #else
-    Serial.println("Error: No MPU9250 IMU available for magnetometer calibration.");
-    Serial.println("Enable either USE_MPU9250_SPI (main IMU) or USE_MPU9250_MONITOR_I2C (monitor IMU) in quad.h");
+    Serial.println("Error: No ICM20948/MPU9250 IMU available for magnetometer calibration.");
+    Serial.println("Enable either USE_ICM20948_I2C / USE_MPU9250_SPI (main IMU) or USE_ICM20948_MONITOR_I2C / USE_MPU9250_MONITOR_I2C (monitor IMU) in quad.h");
     Serial.println("Note: MPU6050 does not have a magnetometer, so magnetometer calibration is not applicable.");
     while(1); //Halt code so it won't enter main loop until this function commented out
   #endif
@@ -2399,6 +2651,57 @@ void loopRate(int freq) {
   //Sit in loop until appropriate time has passed
   while (invFreq > (checker - current_time)) {
     checker = micros();
+  }
+}
+
+void injectManeuverSequence() {
+  static unsigned long seq_start = 0;
+  static bool seq_running = false;
+
+  // Arm the sequence via CH6 switch from TX
+  // so pilot still has manual abort via CH5
+  if (channel_6_pwm > 1500 && !seq_running) {
+    seq_start = millis();
+    seq_running = true;
+  }
+  if (!seq_running) return;
+
+  unsigned long t = millis() - seq_start;
+
+  // Hover settle: 0–10 s
+  if (t < 10000) {
+    channel_1_pwm = 1350;  // hover throttle — tune to your AUW
+    channel_2_pwm = 1500;  // roll neutral
+    channel_3_pwm = 1500;  // pitch neutral
+    channel_4_pwm = 1500;  // yaw neutral
+
+  // Roll step +15°: 10–20 s
+  } else if (t < 20000) {
+    channel_2_pwm = 1650;  // roll right ~+15° at your maxRoll scale
+
+  // Gap — settle: 20–25 s
+  } else if (t < 25000) {
+    channel_2_pwm = 1500;
+
+  // Pitch step +15°: 25–35 s
+  } else if (t < 35000) {
+    channel_3_pwm = 1650;  // pitch forward
+
+  // Gap — settle: 35–40 s
+  } else if (t < 40000) {
+    channel_3_pwm = 1500;
+
+  // Yaw step +30°: 40–50 s
+  } else if (t < 50000) {
+    channel_4_pwm = 1650;  // yaw right
+
+  // Gap — return: 50–60 s
+  } else if (t < 60000) {
+    channel_4_pwm = 1500;
+
+  // Sequence complete — hand back to pilot
+  } else {
+    seq_running = false;
   }
 }
 
