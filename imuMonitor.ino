@@ -1,8 +1,8 @@
 //FCU Madgwick Control Filter Research Platform
 //Author: Patrick Andrasena T.
 //Project Start: 8/21/2025
-//Last Updated: 4/14/2026
-//Version: Beta 1.4.6
+//Last Updated: 5/15/2026
+//Version: Beta 1.5.1
 //
 //Project's base: 
 
@@ -43,6 +43,14 @@ extern float B_accel, B_gyro, B_mag;
 // Monitor IMU object declaration
 #if defined USE_MPU9250_MONITOR_I2C
   MPU9250 mpu9250_monitor(Wire1, 0x69);
+#elif defined USE_ICM20948_MONITOR_I2C
+  ICM20948 icm20948_monitor(Wire1);
+#endif
+
+#if defined USE_MPU9250_MONITOR_I2C
+  #define MON_OBJ mpu9250_monitor
+#elif defined USE_ICM20948_MONITOR_I2C
+  #define MON_OBJ icm20948_monitor
 #endif
 
 //
@@ -94,7 +102,7 @@ extern float B_accel, B_gyro, B_mag;
 // Event Detection Version: 1.1
 // Last Updated: 2025-01-22
 
-#if defined USE_MPU9250_MONITOR_I2C
+#if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
 
 // Ethernet and UDP objects
 EthernetUDP Udp;
@@ -159,7 +167,7 @@ void monitorIMUinit() {
   Wire1.begin();
   Wire1.setClock(400000);  // 400kHz clock speed for monitor IMU
   
-  int status_mon = mpu9250_monitor.begin();
+  int status_mon = MON_OBJ.begin();
   
   if (status_mon < 0) {
     Serial.println("MPU9250 monitor initialization unsuccessful");
@@ -174,29 +182,29 @@ void monitorIMUinit() {
   // Configure monitor IMU using same range settings as primary IMU (from quad.h)
   // This ensures consistent scaling for comparison/ground-truth purposes
   #if defined GYRO_250DPS
-    mpu9250_monitor.setGyroRange(mpu9250_monitor.GYRO_RANGE_250DPS);
+    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_250DPS);
   #elif defined GYRO_500DPS
-    mpu9250_monitor.setGyroRange(mpu9250_monitor.GYRO_RANGE_500DPS);
+    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_500DPS);
   #elif defined GYRO_1000DPS
-    mpu9250_monitor.setGyroRange(mpu9250_monitor.GYRO_RANGE_1000DPS);
+    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_1000DPS);
   #elif defined GYRO_2000DPS
-    mpu9250_monitor.setGyroRange(mpu9250_monitor.GYRO_RANGE_2000DPS);
+    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_2000DPS);
   #endif
   
   #if defined ACCEL_2G
-    mpu9250_monitor.setAccelRange(mpu9250_monitor.ACCEL_RANGE_2G);
+    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_2G);
   #elif defined ACCEL_4G
-    mpu9250_monitor.setAccelRange(mpu9250_monitor.ACCEL_RANGE_4G);
+    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_4G);
   #elif defined ACCEL_8G
-    mpu9250_monitor.setAccelRange(mpu9250_monitor.ACCEL_RANGE_8G);
+    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_8G);
   #elif defined ACCEL_16G
-    mpu9250_monitor.setAccelRange(mpu9250_monitor.ACCEL_RANGE_16G);
+    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_16G);
   #endif
   
-  mpu9250_monitor.setMagCalX(MagErrorX, MagScaleX);
-  mpu9250_monitor.setMagCalY(MagErrorY, MagScaleY);
-  mpu9250_monitor.setMagCalZ(MagErrorZ, MagScaleZ);
-  mpu9250_monitor.setSrd(0); // 1kHz accel/gyro, 100Hz mag
+  MON_OBJ.setMagCalX(MagErrorX, MagScaleX);
+  MON_OBJ.setMagCalY(MagErrorY, MagScaleY);
+  MON_OBJ.setMagCalZ(MagErrorZ, MagScaleZ);
+  MON_OBJ.setSrd(0); // 1kHz accel/gyro, 100Hz mag
   
   // Initialize W5500 Ethernet via SPI
   pinMode(W5500_CS_PIN, OUTPUT);
@@ -239,12 +247,12 @@ void getIMUdataMonitor() {
   // Read and scale data from monitor IMU using library high-level getters
   // Accelerometer: m/s^2 -> g's (to match primary IMU units)
   // Gyro: rad/s -> deg/s (to match primary IMU units)
-  mpu9250_monitor.readSensor();
+  MON_OBJ.readSensor();
 
   // Accelerometer (convert to g and apply LP filter like primary IMU)
-  float AccX_raw = mpu9250_monitor.getAccelX_mss() / 9.807f;
-  float AccY_raw = mpu9250_monitor.getAccelY_mss() / 9.807f;
-  float AccZ_raw = mpu9250_monitor.getAccelZ_mss() / 9.807f;
+  float AccX_raw = MON_OBJ.getAccelX_mss() / 9.807f;
+  float AccY_raw = MON_OBJ.getAccelY_mss() / 9.807f;
+  float AccZ_raw = MON_OBJ.getAccelZ_mss() / 9.807f;
   
   // Apply monitor IMU calibration corrections for accelerometer
   AccX_raw = AccX_raw - AccErrorX_mon;
@@ -259,9 +267,9 @@ void getIMUdataMonitor() {
   AccZ_mon_prev = AccZ_mon;
 
   // Gyro (convert to deg/sec and apply LP filter like primary IMU)
-  float GyroX_raw = mpu9250_monitor.getGyroX_rads() * 57.29577951f;
-  float GyroY_raw = mpu9250_monitor.getGyroY_rads() * 57.29577951f;
-  float GyroZ_raw = mpu9250_monitor.getGyroZ_rads() * 57.29577951f;
+  float GyroX_raw = MON_OBJ.getGyroX_rads() * 57.29577951f;
+  float GyroY_raw = MON_OBJ.getGyroY_rads() * 57.29577951f;
+  float GyroZ_raw = MON_OBJ.getGyroZ_rads() * 57.29577951f;
   
   // Apply monitor IMU calibration corrections for gyro
   GyroX_raw = GyroX_raw - GyroErrorX_mon;
@@ -276,9 +284,9 @@ void getIMUdataMonitor() {
   GyroZ_mon_prev = GyroZ_mon;
 
   // Magnetometer (apply calibration and LP filter like primary IMU)
-  float MagX_raw = mpu9250_monitor.getMagX_uT();
-  float MagY_raw = mpu9250_monitor.getMagY_uT();
-  float MagZ_raw = mpu9250_monitor.getMagZ_uT();
+  float MagX_raw = MON_OBJ.getMagX_uT();
+  float MagY_raw = MON_OBJ.getMagY_uT();
+  float MagZ_raw = MON_OBJ.getMagZ_uT();
   MagX_raw = (MagX_raw - MagErrorX)*MagScaleX;
   MagY_raw = (MagY_raw - MagErrorY)*MagScaleY;
   MagZ_raw = (MagZ_raw - MagErrorZ)*MagScaleZ;
@@ -382,10 +390,10 @@ void MadgwickMonitor(float gx, float gy, float gz, float ax, float ay, float az,
     s3 *= recipNorm;
 
     // Apply feedback step
-    qDot1 -= B_madgwick * s0;
-    qDot2 -= B_madgwick * s1;
-    qDot3 -= B_madgwick * s2;
-    qDot4 -= B_madgwick * s3;
+    qDot1 -= B_MADGWICK_MONITOR * s0;
+    qDot2 -= B_MADGWICK_MONITOR * s1;
+    qDot3 -= B_MADGWICK_MONITOR * s2;
+    qDot4 -= B_MADGWICK_MONITOR * s3;
   }
 
   // Integrate rate of change of quaternion to yield quaternion
@@ -460,10 +468,10 @@ void Madgwick6DOFMonitor(float gx, float gy, float gz, float ax, float ay, float
     s3 *= recipNorm;
 
     // Apply feedback step
-    qDot1 -= B_madgwick * s0;
-    qDot2 -= B_madgwick * s1;
-    qDot3 -= B_madgwick * s2;
-    qDot4 -= B_madgwick * s3;
+    qDot1 -= B_MADGWICK_MONITOR * s0;
+    qDot2 -= B_MADGWICK_MONITOR * s1;
+    qDot3 -= B_MADGWICK_MONITOR * s2;
+    qDot4 -= B_MADGWICK_MONITOR * s3;
   }
 
   // Integrate rate of change of quaternion to yield quaternion
@@ -635,6 +643,8 @@ void sendIMUDataUDP() {
   
   // Madgwick filter beta parameter from main controller
   dataPacket.B_madgwick = B_madgwick;
+  // Madgwick filter beta parameter for monitor
+  dataPacket.B_madgwick_monitor = B_MADGWICK_MONITOR;
   
   // Control IMU raw sensors (MPU6050) - ALWAYS sent
   dataPacket.ctrl_acc_x = AccX;
