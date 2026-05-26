@@ -40,8 +40,9 @@
 #define UDP_REMOTE_IP_1 168
 #define UDP_REMOTE_IP_2 1
 #define UDP_REMOTE_IP_3 100
-#define MONITOR_UDP_RATE_MS 10
+#define MONITOR_UDP_RATE_MS 5      // 200 Hz — captures up to 100 Hz dynamics (Nyquist) for beta study
 
+// Monitor runs 9-DOF Madgwick for mon_* attitude in UDP; err_* / diff_* computed in FlightlogAnalysis.py.
 #define USE_MONITOR_ATTITUDE_COMPARISON
 
 #define B_MADGWICK_MONITOR 0.041f
@@ -57,6 +58,12 @@
 // #define ACCEL_4G
 // #define ACCEL_8G
 // #define ACCEL_16G
+
+// Monitor IMU on Wire1: address is auto-detected at boot (0x69 then 0x68) via Teensy TwoWire
+// ACK probe + WHO_AM_I — no fixed AD0 define required.
+// Main (MPU6050) and monitor (MPU9250 / ICM20948) MUST use the same GYRO_* and ACCEL_* above.
+// Main scales raw int16 with GYRO_SCALE_FACTOR / ACCEL_SCALE_FACTOR in FCUMCFRP_B_1.4.6L.ino.
+// Monitor FS + MON_OBJ path: imuMonitor.ino (GYRO_MON_SCALE / ACCEL_MON_SCALE, shared driver API).
 
 // #define USE_ONESHOT125_ESC
 
