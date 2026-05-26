@@ -4,7 +4,7 @@ UDP Data Client for FCU Madgwick Control Filter Research Platform
 Receives IMU telemetry data via UDP and creates live plots + CSV datasets
 
 Author: Patrick Andrasena T.
-Version: 1.1 (Enhanced with Event Detection)
+Version: 1.2 (Enhanced with IBUS Support and Bug Fixes)
 
 ============================================================
 ENHANCED FEATURES - EVENT DETECTION AND LOGGING
@@ -30,11 +30,10 @@ This enhanced version includes comprehensive event detection and logging capabil
    - Real-time console event notifications
    - Session-based file organization
 
-4. PACKET STRUCTURE:
-   - Original: 112 bytes (timestamp + 27 floats)
-   - Enhanced: 113 bytes (timestamp + event_flags + 27 floats)
-   - Backward compatible with existing analysis tools
-   - Event flags use bit-field for efficiency
+4. PACKET / CSV (117 bytes from Teensy):
+   - timestamp_us, event_flags, B_madgwick
+   - ctrl_* / mon_* raw (acc, gyro, mag) and attitudes (roll, pitch, yaw)
+   - err_* / diff_* are NOT on the MCU — FlightlogAnalysis.py derives them from CSV
 
 5. EVENT FLAGS:
    - command_change: Command input changed (>10% threshold)
@@ -51,7 +50,7 @@ This enhanced version includes comprehensive event detection and logging capabil
    - Pilot vs. automated control studies
 
 7. OUTPUT FILES:
-   - data_logs/YYYYMMDD_HHMMSS/imu_data.csv (enhanced with event_flags)
+   - data_logs/YYYYMMDD_HHMMSS/imu_data.csv (timestamped per-IMU raw + attitude)
    - data_logs/YYYYMMDD_HHMMSS/event_log.txt (timestamped events)
 
 ============================================================
@@ -95,30 +94,32 @@ import numpy as np
 UDP_LOCAL_PORT = 8888  # Port to listen on
 UDP_BUFFER_SIZE = 1500  # Standard UDP MTU
 
-# Packet structure (matches IMUDataPacket in imuMonitor.ino)
-# Format: '<I' (uint32_t timestamp) + 'B' (uint8_t event_flags) + '27f' (27 floats)
-# Total: 4 + 1 + (27 * 4) = 113 bytes
-PACKET_FORMAT = '<IB27f'  # Little-endian, 1 uint32, 1 uint8, 27 floats
-PACKET_SIZE = 113  # bytes
+# Packet from Teensy (IMUDataPacket): per-IMU raw + attitude only — 117 bytes
+# err_* / diff_* are computed in FlightlogAnalysis.py (not on MCU)
+PACKET_FORMAT = '<IBf27f'
+PACKET_SIZE = 117
+PACKET_FORMAT_LEGACY_V2 = '<IBf33f'  # old firmware with on-board diffs
+PACKET_SIZE_LEGACY_V2 = 141
 
-# Data field names (in order of struct definition)
+# Logged CSV columns (timestamped); comparisons added at analysis time
 FIELD_NAMES = [
     'timestamp_us',
-    'event_flags',  # Event detection flags byte
-    # Control IMU raw sensors (MPU6050)
+    'event_flags',
+    'B_madgwick',
     'ctrl_acc_x', 'ctrl_acc_y', 'ctrl_acc_z',
     'ctrl_gyro_x', 'ctrl_gyro_y', 'ctrl_gyro_z',
     'ctrl_mag_x', 'ctrl_mag_y', 'ctrl_mag_z',
-    # Monitor IMU raw sensors (MPU9250)
     'mon_acc_x', 'mon_acc_y', 'mon_acc_z',
     'mon_gyro_x', 'mon_gyro_y', 'mon_gyro_z',
     'mon_mag_x', 'mon_mag_y', 'mon_mag_z',
-    # Control IMU attitude (from Madgwick filter)
     'ctrl_roll', 'ctrl_pitch', 'ctrl_yaw',
-    # Monitor IMU attitude (from Madgwick filter)
     'mon_roll', 'mon_pitch', 'mon_yaw',
-    # Attitude comparison errors
-    'err_roll', 'err_pitch', 'err_yaw'
+]
+
+DERIVED_COMPARISON_FIELDS = [
+    'err_roll', 'err_pitch', 'err_yaw',
+    'diff_gyro_x', 'diff_gyro_y', 'diff_gyro_z',
+    'diff_acc_x', 'diff_acc_y', 'diff_acc_z',
 ]
 
 # Event flag definitions (matching EventFlags struct in imuMonitor.ino)
@@ -278,10 +279,11 @@ class UDPDataClient:
                 try:
                     data, addr = self.sock.recvfrom(UDP_BUFFER_SIZE)
                     
-                    if len(data) == PACKET_SIZE:
+                    if len(data) in (PACKET_SIZE, PACKET_SIZE_LEGACY_V2):
                         self.data_queue.put((data, addr))
                     else:
-                        print(f"Warning: Received packet of size {len(data)} bytes, expected {PACKET_SIZE}")
+                        print(f"Warning: Received packet of size {len(data)} bytes, "
+                              f"expected {PACKET_SIZE} (or legacy {PACKET_SIZE_LEGACY_V2})")
                         
                 except socket.timeout:
                     continue
@@ -302,12 +304,22 @@ class UDPDataClient:
             try:
                 data, addr = self.data_queue.get(timeout=0.1)
                 
-                # Unpack packet
                 try:
-                    unpacked = struct.unpack(PACKET_FORMAT, data)
-                    
-                    # Create dictionary from unpacked data
-                    packet_dict = dict(zip(FIELD_NAMES, unpacked))
+                    if len(data) == PACKET_SIZE:
+                        unpacked = struct.unpack(PACKET_FORMAT, data)
+                        packet_dict = dict(zip(FIELD_NAMES, unpacked))
+                    elif len(data) == PACKET_SIZE_LEGACY_V2:
+                        # Old 141-byte packets: log per-IMU fields only (ignore MCU diffs)
+                        legacy_names = FIELD_NAMES + [
+                            'err_roll', 'err_pitch', 'err_yaw',
+                            'diff_gyro_x', 'diff_gyro_y', 'diff_gyro_z',
+                            'diff_acc_x', 'diff_acc_y', 'diff_acc_z',
+                        ]
+                        unpacked = struct.unpack(PACKET_FORMAT_LEGACY_V2, data)
+                        full = dict(zip(legacy_names, unpacked))
+                        packet_dict = {k: full[k] for k in FIELD_NAMES}
+                    else:
+                        continue
                     
                     # Store first Arduino timestamp as reference
                     if self.first_timestamp_us is None:
@@ -463,10 +475,18 @@ class LivePlotter:
             self.lines['mon_pitch'].set_data(time_data, self.data_client.data_buffers['mon_pitch'])
             self.lines['mon_yaw'].set_data(time_data, self.data_client.data_buffers['mon_yaw'])
             
-            # Update error plots
-            self.lines['err_roll'].set_data(time_data, self.data_client.data_buffers['err_roll'])
-            self.lines['err_pitch'].set_data(time_data, self.data_client.data_buffers['err_pitch'])
-            self.lines['err_yaw'].set_data(time_data, self.data_client.data_buffers['err_yaw'])
+            # Attitude error (derived on PC, same as FlightlogAnalysis.py)
+            err_roll = np.array(self.data_client.data_buffers['ctrl_roll']) - np.array(
+                self.data_client.data_buffers['mon_roll'])
+            err_pitch = np.array(self.data_client.data_buffers['ctrl_pitch']) - np.array(
+                self.data_client.data_buffers['mon_pitch'])
+            err_yaw = np.array(self.data_client.data_buffers['ctrl_yaw']) - np.array(
+                self.data_client.data_buffers['mon_yaw'])
+            err_yaw = np.where(err_yaw > 180, err_yaw - 360, err_yaw)
+            err_yaw = np.where(err_yaw < -180, err_yaw + 360, err_yaw)
+            self.lines['err_roll'].set_data(time_data, err_roll)
+            self.lines['err_pitch'].set_data(time_data, err_pitch)
+            self.lines['err_yaw'].set_data(time_data, err_yaw)
             
             # Update accelerometer plots
             self.lines['ctrl_acc_x'].set_data(time_data, self.data_client.data_buffers['ctrl_acc_x'])
