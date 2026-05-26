@@ -45,11 +45,71 @@ http://www.bolderflight.com
  
 // ─── Static constant definition ───────────────────────────────────────────────
 const float ICM20948::AK09916_MAG_SCALE = 0.15f;  // µT per LSB (16-bit mode)
+
+// Same body-frame remap as MPU9250 (Bolder Flight) — accel/gyro only; mag unchanged.
+const int16_t ICM20948::tX[3] = {0,  1,  0};
+const int16_t ICM20948::tY[3] = {1,  0,  0};
+const int16_t ICM20948::tZ[3] = {0,  0, -1};
+
+int16_t ICM20948::transformCount(const int16_t t[3], int16_t c0, int16_t c1, int16_t c2) {
+  return (int16_t)(t[0] * c0 + t[1] * c1 + t[2] * c2);
+}
  
 // ════════════════════════════════════════════════════════════════════════════
 //  Constructor
 // ════════════════════════════════════════════════════════════════════════════
  
+namespace {
+
+// Teensy Wire: ACK-only presence check (same pattern as Wire/examples/Scanner).
+bool wireAckAt(TwoWire &bus, uint8_t address) {
+  bus.beginTransmission(address);
+  return bus.endTransmission() == 0;
+}
+
+// Minimal WHO_AM_I read without full begin() / soft-reset.
+bool icmWhoAmIAt(TwoWire &bus, uint8_t address, uint8_t *whoAmI) {
+  if (!wireAckAt(bus, address)) {
+    return false;
+  }
+  bus.beginTransmission(address);
+  bus.write(0x7F);  // REG_BANK_SEL → bank 0
+  bus.write((uint8_t)0x00);
+  if (bus.endTransmission() != 0) {
+    return false;
+  }
+  bus.beginTransmission(address);
+  bus.write(0x00);  // WHO_AM_I (bank 0)
+  if (bus.endTransmission(false) != 0) {
+    return false;
+  }
+  if (bus.requestFrom((int)address, 1) != 1) {
+    return false;
+  }
+  *whoAmI = bus.read();
+  return true;
+}
+
+}  // namespace
+
+void ICM20948::setAddress(uint8_t address) {
+  _address = address;
+}
+
+uint8_t ICM20948::detectOnBus(TwoWire &bus) {
+  static const uint8_t kCandidates[] = {
+      ICM20948_I2C_ADDR_HIGH,
+      ICM20948_I2C_ADDR_LOW,
+  };
+  for (uint8_t addr : kCandidates) {
+    uint8_t who = 0;
+    if (icmWhoAmIAt(bus, addr, &who) && who == ICM20948_WHO_AM_I_VAL) {
+      return addr;
+    }
+  }
+  return 0;
+}
+
 ICM20948::ICM20948(TwoWire &bus, uint8_t address)
     : _i2c(&bus), _address(address), _numBytes(0),
       _ax(0), _ay(0), _az(0),
@@ -68,7 +128,8 @@ ICM20948::ICM20948(TwoWire &bus, uint8_t address)
       _counter(0), _framedelta(0), _delta(0),
       _hxfilt(0), _hyfilt(0), _hzfilt(0),
       _hxmax(0), _hymax(0), _hzmax(0),
-      _hxmin(0), _hymin(0), _hzmin(0), _avgs(0) {}
+      _hxmin(0), _hymin(0), _hzmin(0), _avgs(0),
+      _magDataReady(false) {}
  
 // ════════════════════════════════════════════════════════════════════════════
 //  begin() — initialise device
@@ -98,13 +159,13 @@ int ICM20948::begin() {
   // ACCEL_CONFIG Bank 2: ACCEL_FS_SEL[1:0] | DLPF_EN | ACCEL_DLPFCFG[2:0]
   // Set FS = 16G, DLPF enabled, DLPFCFG = 0 (229 Hz 3dB bandwidth)
   if (writeReg(2, ACCEL_CONFIG, (uint8_t)(ACCEL_FS_16G | DLPF_EN | 0x00)) < 0) return -5;
-  _accelScale = _G * 16.0f / 32767.5f;
+  _accelScale = _G * 16.0f / INVENSENSE_LSB_SCALE;
   _accelRange = ACCEL_RANGE_16G;
  
   // ── 6. Default gyro range ±2000 °/s ──────────────────────────────────────
   // GYRO_CONFIG_1 Bank 2: GYRO_FS_SEL[1:0] | DLPF_EN | GYRO_DLPFCFG[2:0]
   if (writeReg(2, GYRO_CONFIG_1, (uint8_t)(GYRO_FS_2000DPS | DLPF_EN | 0x00)) < 0) return -6;
-  _gyroScale = 2000.0f / 32767.5f * _d2r;
+  _gyroScale = 2000.0f / INVENSENSE_LSB_SCALE * _d2r;
   _gyroRange = GYRO_RANGE_2000DPS;
  
   // ── 7. Maximum sample rate (divider = 0) ─────────────────────────────────
@@ -157,10 +218,10 @@ int ICM20948::setAccelRange(AccelRange range) {
   if (readRegs(2, ACCEL_CONFIG, 1, &current) < 0) return -1;
   current &= ~(0x06);  // clear FS_SEL bits [2:1]
   switch (range) {
-    case ACCEL_RANGE_2G:  current |= ACCEL_FS_2G;  _accelScale = _G * 2.0f  / 32767.5f; break;
-    case ACCEL_RANGE_4G:  current |= ACCEL_FS_4G;  _accelScale = _G * 4.0f  / 32767.5f; break;
-    case ACCEL_RANGE_8G:  current |= ACCEL_FS_8G;  _accelScale = _G * 8.0f  / 32767.5f; break;
-    case ACCEL_RANGE_16G: current |= ACCEL_FS_16G; _accelScale = _G * 16.0f / 32767.5f; break;
+    case ACCEL_RANGE_2G:  current |= ACCEL_FS_2G;  _accelScale = _G * 2.0f  / INVENSENSE_LSB_SCALE; break;
+    case ACCEL_RANGE_4G:  current |= ACCEL_FS_4G;  _accelScale = _G * 4.0f  / INVENSENSE_LSB_SCALE; break;
+    case ACCEL_RANGE_8G:  current |= ACCEL_FS_8G;  _accelScale = _G * 8.0f  / INVENSENSE_LSB_SCALE; break;
+    case ACCEL_RANGE_16G: current |= ACCEL_FS_16G; _accelScale = _G * 16.0f / INVENSENSE_LSB_SCALE; break;
     default: return -2;
   }
   if (writeReg(2, ACCEL_CONFIG, current) < 0) return -3;
@@ -173,10 +234,10 @@ int ICM20948::setGyroRange(GyroRange range) {
   if (readRegs(2, GYRO_CONFIG_1, 1, &current) < 0) return -1;
   current &= ~(0x06);  // clear FS_SEL bits [2:1]
   switch (range) {
-    case GYRO_RANGE_250DPS:  current |= GYRO_FS_250DPS;  _gyroScale = 250.0f  / 32767.5f * _d2r; break;
-    case GYRO_RANGE_500DPS:  current |= GYRO_FS_500DPS;  _gyroScale = 500.0f  / 32767.5f * _d2r; break;
-    case GYRO_RANGE_1000DPS: current |= GYRO_FS_1000DPS; _gyroScale = 1000.0f / 32767.5f * _d2r; break;
-    case GYRO_RANGE_2000DPS: current |= GYRO_FS_2000DPS; _gyroScale = 2000.0f / 32767.5f * _d2r; break;
+    case GYRO_RANGE_250DPS:  current |= GYRO_FS_250DPS;  _gyroScale = 250.0f  / INVENSENSE_LSB_SCALE * _d2r; break;
+    case GYRO_RANGE_500DPS:  current |= GYRO_FS_500DPS;  _gyroScale = 500.0f  / INVENSENSE_LSB_SCALE * _d2r; break;
+    case GYRO_RANGE_1000DPS: current |= GYRO_FS_1000DPS; _gyroScale = 1000.0f / INVENSENSE_LSB_SCALE * _d2r; break;
+    case GYRO_RANGE_2000DPS: current |= GYRO_FS_2000DPS; _gyroScale = 2000.0f / INVENSENSE_LSB_SCALE * _d2r; break;
     default: return -2;
   }
   if (writeReg(2, GYRO_CONFIG_1, current) < 0) return -3;
@@ -225,53 +286,57 @@ void ICM20948::setMagCalZ(float bias, float scale) { _hzb = bias; _hzs = scale; 
 //  readSensor() — burst-read all sensor registers in one I²C transaction
 // ════════════════════════════════════════════════════════════════════════════
  
-int ICM20948::readSensor() {
- 
-  // ── 1. Read 12 bytes of accel (6) + gyro (6) from Bank 0 ACCEL_XOUT_H ───
+int ICM20948::readRawCounts() {
   if (readRegs(0, ACCEL_XOUT_H, 12, _buffer) < 0) return -1;
- 
+
   _axcounts = (int16_t)(((uint16_t)_buffer[0]  << 8) | _buffer[1]);
   _aycounts = (int16_t)(((uint16_t)_buffer[2]  << 8) | _buffer[3]);
   _azcounts = (int16_t)(((uint16_t)_buffer[4]  << 8) | _buffer[5]);
   _gxcounts = (int16_t)(((uint16_t)_buffer[6]  << 8) | _buffer[7]);
   _gycounts = (int16_t)(((uint16_t)_buffer[8]  << 8) | _buffer[9]);
   _gzcounts = (int16_t)(((uint16_t)_buffer[10] << 8) | _buffer[11]);
- 
-  // Scale and apply gyro bias
-  _ax = _axcounts * _accelScale;
-  _ay = _aycounts * _accelScale;
-  _az = _azcounts * _accelScale;
-  _gx = _gxcounts * _gyroScale - _gxb;
-  _gy = _gycounts * _gyroScale - _gyb;
-  _gz = _gzcounts * _gyroScale - _gzb;
- 
-  // ── 2. Read temperature (2 bytes) from Bank 0 TEMP_OUT_H ─────────────────
+
   if (readRegs(0, TEMP_OUT_H, 2, _buffer) < 0) return -2;
   _tcounts = (int16_t)(((uint16_t)_buffer[0] << 8) | _buffer[1]);
-  _t = (float)_tcounts / _tempScale + _tempOffset;
- 
-  // ── 3. Read 9 bytes of mag data from EXT_SLV_SENS_DATA_00 ────────────────
-  // Layout as configured in begin():  ST1(1) + HXL…HZH(6) + ST2(1) + pad(1)
-  // byte 0 = ST1 (DRDY), bytes 1-6 = HXL HXH HYL HYH HZL HZH, byte 7 = ST2
+
   if (readRegs(0, EXT_SLV_SENS_DATA_00, 9, _buffer) < 0) return -3;
- 
-  // Check DRDY bit in ST1 (bit 0). If not set, mag data is stale but we
-  // proceed with previous values rather than blocking — consistent with the
-  // MPU9250 library which never blocks on DRDY.
-  // Only unpack if DRDY is set to avoid latching stale data.
-  if (_buffer[0] & 0x01) {
+  _magDataReady = (_buffer[0] & 0x01) != 0;
+  if (_magDataReady) {
     _hxcounts = (int16_t)(((uint16_t)_buffer[2] << 8) | _buffer[1]);
     _hycounts = (int16_t)(((uint16_t)_buffer[4] << 8) | _buffer[3]);
     _hzcounts = (int16_t)(((uint16_t)_buffer[6] << 8) | _buffer[5]);
-    // (buffer[7] = ST2 — must be consumed to unlatch; already read)
- 
-    // AK09916 sensitivity: 0.15 µT/LSB (fixed, no factory trim registers)
-    // Apply hard/soft-iron correction supplied via setMagCalX/Y/Z
+  }
+
+  return 1;
+}
+
+int ICM20948::readSensor() {
+  if (readRawCounts() < 0) return -1;
+
+  // Accel/gyro: same axis remap as MPU9250::readSensor() (mag stays chip-native).
+  const int16_t tax = transformCount(tX, _axcounts, _aycounts, _azcounts);
+  const int16_t tay = transformCount(tY, _axcounts, _aycounts, _azcounts);
+  const int16_t taz = transformCount(tZ, _axcounts, _aycounts, _azcounts);
+  const int16_t tgx = transformCount(tX, _gxcounts, _gycounts, _gzcounts);
+  const int16_t tgy = transformCount(tY, _gxcounts, _gycounts, _gzcounts);
+  const int16_t tgz = transformCount(tZ, _gxcounts, _gycounts, _gzcounts);
+
+  _ax = (float)tax * _accelScale;
+  _ay = (float)tay * _accelScale;
+  _az = (float)taz * _accelScale;
+  _gx = (float)tgx * _gyroScale - _gxb;
+  _gy = (float)tgy * _gyroScale - _gyb;
+  _gz = (float)tgz * _gyroScale - _gzb;
+
+  _t = ((((float)_tcounts) - _tempOffset) / _tempScale) + _tempOffset;
+
+  // AK09916: fixed 0.15 µT/LSB (unlike AK8963 ASA). Update µT only when ST1 DRDY set.
+  if (_magDataReady) {
     _hx = (_hxcounts * AK09916_MAG_SCALE - _hxb) * _hxs;
     _hy = (_hycounts * AK09916_MAG_SCALE - _hyb) * _hys;
     _hz = (_hzcounts * AK09916_MAG_SCALE - _hzb) * _hzs;
   }
- 
+
   return 1;
 }
  
@@ -295,20 +360,35 @@ float ICM20948::getTemperature_C() { return _t; }
 // ════════════════════════════════════════════════════════════════════════════
  
 int ICM20948::calibrateGyro() {
-  _gxbD = 0; _gybD = 0; _gzbD = 0;
+  const GyroRange savedRange = _gyroRange;
+  const DlpfBandwidth savedBw = _bandwidth;
+  const uint8_t savedSrd = _srd;
+
+  if (setGyroRange(GYRO_RANGE_250DPS) < 0) return -1;
+  if (setDlpfBandwidth(DLPF_BANDWIDTH_24HZ) < 0) return -2;
+  if (setSrd(19) < 0) return -3;
+
+  _gxbD = 0;
+  _gybD = 0;
+  _gzbD = 0;
+  _gxb = 0.0f;
+  _gyb = 0.0f;
+  _gzb = 0.0f;
+
   for (size_t i = 0; i < _numSamples; i++) {
-    if (readSensor() < 0) return -1;
-    // readSensor subtracts _gxb/_gyb/_gzb, which are still 0 here, so
-    // the raw rate read is _gx/_gy/_gz (no bias applied yet).
-    // We must read the pre-bias-subtracted value from the raw getter.
-    _gxbD += (_gxcounts * _gyroScale);
-    _gybD += (_gycounts * _gyroScale);
-    _gzbD += (_gzcounts * _gyroScale);
-    delay(10);
+    if (readSensor() < 0) return -4;
+    _gxbD += (getGyroX_rads() + _gxb) / (double)_numSamples;
+    _gybD += (getGyroY_rads() + _gyb) / (double)_numSamples;
+    _gzbD += (getGyroZ_rads() + _gzb) / (double)_numSamples;
+    delay(20);
   }
-  _gxb = (float)(_gxbD / _numSamples);
-  _gyb = (float)(_gybD / _numSamples);
-  _gzb = (float)(_gzbD / _numSamples);
+  _gxb = (float)_gxbD;
+  _gyb = (float)_gybD;
+  _gzb = (float)_gzbD;
+
+  if (setGyroRange(savedRange) < 0) return -5;
+  if (setDlpfBandwidth(savedBw) < 0) return -6;
+  if (setSrd(savedSrd) < 0) return -7;
   return 1;
 }
  
@@ -335,6 +415,33 @@ float ICM20948::getMagScaleFactorZ()  { return _hzs; }
 //  Mirrors MPU9250::calibrateMag() algorithm and return convention.
 // ════════════════════════════════════════════════════════════════════════════
  
+void ICM20948::getMotion6(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16_t *gy, int16_t *gz) {
+  // Chip-native counts (no axis remap / bias) — same contract as MPU9250::getMotion6.
+  if (readRegs(0, ACCEL_XOUT_H, 12, _buffer) < 0) {
+    *ax = *ay = *az = *gx = *gy = *gz = 0;
+    return;
+  }
+  *ax = (int16_t)(((uint16_t)_buffer[0]  << 8) | _buffer[1]);
+  *ay = (int16_t)(((uint16_t)_buffer[2]  << 8) | _buffer[3]);
+  *az = (int16_t)(((uint16_t)_buffer[4]  << 8) | _buffer[5]);
+  *gx = (int16_t)(((uint16_t)_buffer[6]  << 8) | _buffer[7]);
+  *gy = (int16_t)(((uint16_t)_buffer[8]  << 8) | _buffer[9]);
+  *gz = (int16_t)(((uint16_t)_buffer[10] << 8) | _buffer[11]);
+}
+
+void ICM20948::getMotion9(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16_t *gy, int16_t *gz,
+                          int16_t *mx, int16_t *my, int16_t *mz) {
+  getMotion6(ax, ay, az, gx, gy, gz);
+  if (readRegs(0, EXT_SLV_SENS_DATA_00, 8, _buffer) < 0) {
+    *mx = *my = *mz = 0;
+    return;
+  }
+  // ST1 + 6 mag bytes (AK09916 little-endian); skip ST2 for raw motion helper.
+  *mx = (int16_t)(((uint16_t)_buffer[2] << 8) | _buffer[1]);
+  *my = (int16_t)(((uint16_t)_buffer[4] << 8) | _buffer[3]);
+  *mz = (int16_t)(((uint16_t)_buffer[6] << 8) | _buffer[5]);
+}
+
 int ICM20948::calibrateMag() {
   // Reset min/max trackers
   _hxmax = -1e9f; _hymax = -1e9f; _hzmax = -1e9f;
