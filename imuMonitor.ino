@@ -22,12 +22,9 @@
 #include <Arduino.h>
 // Wire1 is available from Wire.h on Teensy 4.0 (no separate Wire1.h needed)
 
-//This file contains all necessary functions and code used for IMU monitoring (control system validation)
-//Purpose: MPU9250 (I2C Wire1) monitor validates MPU6050 (I2C Wire) control IMU attitude estimates
-//Both IMUs run independent Madgwick filters to provide comparable attitude angles for validation.
-//Monitor uses Wire1 (SDA1=RX4=pin 16, SCL1=TX4=pin 17) at 400kHz, separate from MPU6050 on Wire at 1000kHz
-//Data is sent via UDP over W5500 Ethernet (SPI) instead of serial for real-time telemetry
-//Enable/disable via USE_MPU9250_MONITOR_I2C in quad.h
+// IMU monitor: 9-DOF reference on Wire1 validates 6-DOF control IMU on Wire (Madgwick beta study).
+// Telemetry via W5500 UDP — see UDPClient.py and FlightlogAnalysis.py.
+// Enable USE_MPU9250_MONITOR_I2C or USE_ICM20948_MONITOR_I2C in quad.h (exactly one).
 
 //========================================================================================================================//
 //                                          EXTERNAL VARIABLES                                                         //
@@ -39,12 +36,71 @@ extern float GyroErrorX_mon, GyroErrorY_mon, GyroErrorZ_mon;
 extern float MagErrorX, MagErrorY, MagErrorZ;
 extern float MagScaleX, MagScaleY, MagScaleZ;
 extern float B_accel, B_gyro, B_mag;
+extern float B_madgwick;
+extern float AccX_mon, AccY_mon, AccZ_mon;
+extern float GyroX_mon, GyroY_mon, GyroZ_mon;
+extern float MagX_mon, MagY_mon, MagZ_mon;
+extern float AccX_mon_prev, AccY_mon_prev, AccZ_mon_prev;
+extern float GyroX_mon_prev, GyroY_mon_prev, GyroZ_mon_prev;
+extern float MagX_mon_prev, MagY_mon_prev, MagZ_mon_prev;
+extern float roll_IMU_mon, pitch_IMU_mon, yaw_IMU_mon;
+extern float q0_mon, q1_mon, q2_mon, q3_mon;
+extern float AccX, AccY, AccZ, GyroX, GyroY, GyroZ, MagX, MagY, MagZ;
+extern float roll_IMU, pitch_IMU, yaw_IMU;
+extern float thro_des, roll_des, pitch_des, yaw_des;
+extern bool armedFly;
+extern float invSqrt(float x);
 
-// Monitor IMU object declaration
 #if defined USE_MPU9250_MONITOR_I2C
-  MPU9250 mpu9250_monitor(Wire1, 0x69);
+  #include "src/MPU9250/MPU9250.h"
 #elif defined USE_ICM20948_MONITOR_I2C
-  ICM20948 icm20948_monitor(Wire1);
+  #include "src/ICM20948/ICM20948.h"
+#endif
+
+// Monitor full-scale (class scope; tied to quad.h GYRO_* / ACCEL_*)
+#if defined USE_ICM20948_MONITOR_I2C
+  #define GYRO_MON_FS_SEL_250    ICM20948::GYRO_RANGE_250DPS
+  #define GYRO_MON_FS_SEL_500    ICM20948::GYRO_RANGE_500DPS
+  #define GYRO_MON_FS_SEL_1000   ICM20948::GYRO_RANGE_1000DPS
+  #define GYRO_MON_FS_SEL_2000   ICM20948::GYRO_RANGE_2000DPS
+  #define ACCEL_MON_FS_SEL_2     ICM20948::ACCEL_RANGE_2G
+  #define ACCEL_MON_FS_SEL_4     ICM20948::ACCEL_RANGE_4G
+  #define ACCEL_MON_FS_SEL_8     ICM20948::ACCEL_RANGE_8G
+  #define ACCEL_MON_FS_SEL_16    ICM20948::ACCEL_RANGE_16G
+#elif defined USE_MPU9250_MONITOR_I2C
+  #define GYRO_MON_FS_SEL_250    MPU9250::GYRO_RANGE_250DPS
+  #define GYRO_MON_FS_SEL_500    MPU9250::GYRO_RANGE_500DPS
+  #define GYRO_MON_FS_SEL_1000   MPU9250::GYRO_RANGE_1000DPS
+  #define GYRO_MON_FS_SEL_2000   MPU9250::GYRO_RANGE_2000DPS
+  #define ACCEL_MON_FS_SEL_2     MPU9250::ACCEL_RANGE_2G
+  #define ACCEL_MON_FS_SEL_4     MPU9250::ACCEL_RANGE_4G
+  #define ACCEL_MON_FS_SEL_8     MPU9250::ACCEL_RANGE_8G
+  #define ACCEL_MON_FS_SEL_16    MPU9250::ACCEL_RANGE_16G
+#endif
+#if defined GYRO_250DPS
+  #define GYRO_MON_SCALE GYRO_MON_FS_SEL_250
+#elif defined GYRO_500DPS
+  #define GYRO_MON_SCALE GYRO_MON_FS_SEL_500
+#elif defined GYRO_1000DPS
+  #define GYRO_MON_SCALE GYRO_MON_FS_SEL_1000
+#elif defined GYRO_2000DPS
+  #define GYRO_MON_SCALE GYRO_MON_FS_SEL_2000
+#endif
+#if defined ACCEL_2G
+  #define ACCEL_MON_SCALE ACCEL_MON_FS_SEL_2
+#elif defined ACCEL_4G
+  #define ACCEL_MON_SCALE ACCEL_MON_FS_SEL_4
+#elif defined ACCEL_8G
+  #define ACCEL_MON_SCALE ACCEL_MON_FS_SEL_8
+#elif defined ACCEL_16G
+  #define ACCEL_MON_SCALE ACCEL_MON_FS_SEL_16
+#endif
+
+// Monitor IMU object declaration (Wire1: SDA1 pin 16, SCL1 pin 17 @ 400 kHz)
+#if defined USE_MPU9250_MONITOR_I2C
+  MPU9250 mpu9250_monitor(Wire1, MPU9250::I2C_ADDR_LOW);
+#elif defined USE_ICM20948_MONITOR_I2C
+  ICM20948 icm20948_monitor(Wire1, ICM20948_I2C_ADDR_LOW);
 #endif
 
 #if defined USE_MPU9250_MONITOR_I2C
@@ -52,55 +108,8 @@ extern float B_accel, B_gyro, B_mag;
 #elif defined USE_ICM20948_MONITOR_I2C
   #define MON_OBJ icm20948_monitor
 #endif
-
-//
-// EVENT DETECTION AND DISTURBANCE MONITORING
-// ==========================================
-//
-// This enhanced version includes comprehensive event detection and disturbance monitoring:
-//
-// 1. EVENT FLAGS STRUCTURE:
-//    - command_change: Command input changed significantly (>10% threshold)
-//    - throttle_change: Throttle changed significantly (>10% threshold)
-//    - roll_command/pitch_command/yaw_command: Active command input detected
-//    - attitude_change: Attitude changed beyond threshold (2°)
-//    - disturbance: Large attitude change WITHOUT command input (>5°)
-//    - control_active: Control system armed and active
-//
-// 2. DISTURBANCE DETECTION LOGIC:
-//    - Only triggers when control system is armed (armedFly = true)
-//    - Only triggers when NO command input is active (all sticks centered)
-//    - Detects attitude changes >5° suggesting external disturbances
-//    - Flags wind gusts, turbulence, or external forces
-//    - Provides real-time disturbance alerts via UDP and serial
-//
-// 3. UDP PACKET ENHANCEMENT:
-//    - Original: 112 bytes (timestamp + 27 floats)
-//    - Enhanced: 113 bytes (timestamp + event_flags + 27 floats)
-//    - Event flags use bit-field for efficient transmission
-//    - Backward compatible with existing analysis tools
-//
-// 4. DETECTION THRESHOLDS:
-//    - COMMAND_THRESHOLD: 0.1 (10% of max command)
-//    - ATTITUDE_THRESHOLD: 2.0° (normal attitude change)
-//    - DISTURBANCE_THRESHOLD: 5.0° (disturbance detection)
-//    - EVENT_DEBOUNCE_MS: 100ms (prevents flag spam)
-//
-// 5. USAGE:
-//    - Event flags are automatically included in UDP telemetry
-//    - Disturbance events printed to serial for debugging
-//    - UDPClient.py logs all events with timestamps
-//    - FlightlogAnalysis.py can analyze event patterns
-//
-// 6. RESEARCH APPLICATIONS:
-//    - Distinguish pilot commands from external disturbances
-//    - Study control system response to wind gusts
-//    - Validate disturbance rejection algorithms
-//    - Analyze flight dynamics in turbulent conditions
-//
-// Author: Patrick Andrasena T.
-// Event Detection Version: 1.1
-// Last Updated: 2025-01-22
+// MON_OBJ: MPU9250-aligned body frame; control 6-DOF, monitor 9-DOF.
+// UDP logs per-IMU raw + attitude only; diffs computed offline in FlightlogAnalysis.py.
 
 #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
 
@@ -122,33 +131,23 @@ struct EventFlags {
   uint8_t disturbance : 1;         // 1 if attitude change detected without command input (>5°)
 } __attribute__((packed));
 
-// Structured data packet for UDP transmission
-// Packet format: [timestamp(uint32_t)] [event_flags(uint8_t)] [B_madgwick(float)] [control_raw(9 floats)] [monitor_raw(9 floats)] [control_attitude(3 floats)] [monitor_attitude(3 floats)] [errors(3 floats)]
-// Total: 4 + 1 + 4 + (27 * 4) = 117 bytes
+// IMUDataPacket — 117 bytes: timestamp + flags + B + 27 floats (UDPClient.py)
 struct IMUDataPacket {
-  uint32_t timestamp_us;  // Timestamp in microseconds
-  EventFlags flags;        // Event detection flags
-  float B_madgwick;       // Madgwick filter beta parameter from main controller
-  
-  // Control IMU raw sensors (MPU6050)
+  uint32_t timestamp_us;
+  EventFlags flags;
+  float B_madgwick;
+
   float ctrl_acc_x, ctrl_acc_y, ctrl_acc_z;
   float ctrl_gyro_x, ctrl_gyro_y, ctrl_gyro_z;
   float ctrl_mag_x, ctrl_mag_y, ctrl_mag_z;
-  
-  // Monitor IMU raw sensors (MPU9250)
+
   float mon_acc_x, mon_acc_y, mon_acc_z;
   float mon_gyro_x, mon_gyro_y, mon_gyro_z;
   float mon_mag_x, mon_mag_y, mon_mag_z;
-  
-  // Control IMU attitude (from Madgwick filter)
+
   float ctrl_roll, ctrl_pitch, ctrl_yaw;
-  
-  // Monitor IMU attitude (from Madgwick filter)
   float mon_roll, mon_pitch, mon_yaw;
-  
-  // Attitude comparison errors
-  float err_roll, err_pitch, err_yaw;
-} __attribute__((packed));  // Pack structure to avoid padding
+} __attribute__((packed));
 
 IMUDataPacket dataPacket;
 
@@ -161,17 +160,37 @@ const float ATTITUDE_THRESHOLD = 2.0;   // 2 degrees threshold for attitude chan
 const float DISTURBANCE_THRESHOLD = 5.0; // 5 degrees threshold for disturbance detection
 const unsigned long EVENT_DEBOUNCE_MS = 100; // 100ms debounce for event detection
 
-// Initialize optional secondary MPU9250 monitor (I2C Wire1) for ground-truth attitude
+// Resolve monitor IMU 7-bit address on Wire1 (AD0 → 0x68 or 0x69) using Teensy TwoWire ACK scan + WHO_AM_I.
+static uint8_t detectMonitorImuAddress(TwoWire &bus) {
+#if defined USE_ICM20948_MONITOR_I2C
+  return ICM20948::detectOnBus(bus);
+#elif defined USE_MPU9250_MONITOR_I2C
+  return MPU9250::detectOnBus(bus);
+#else
+  return 0;
+#endif
+}
+
+// Initialize monitor IMU on I2C Wire1 for ground-truth attitude
 void monitorIMUinit() {
-  // Initialize Wire1 I2C bus at 400kHz (separate from Wire used by MPU6050 at 1000kHz)
   Wire1.begin();
-  Wire1.setClock(400000);  // 400kHz clock speed for monitor IMU
-  
+  Wire1.setClock(400000);
+
+  const uint8_t monitorAddr = detectMonitorImuAddress(Wire1);
+  if (monitorAddr == 0) {
+    Serial.println("Monitor IMU not found on Wire1 (tried 0x69 and 0x68)");
+    Serial.println("Check AD0 wiring, pull-ups, and SDA1/SCL1 (pins 16/17)");
+    while (1) {}
+  }
+  MON_OBJ.setAddress(monitorAddr);
+  Serial.print("Monitor IMU detected on Wire1 at 0x");
+  Serial.println(monitorAddr, HEX);
+
   int status_mon = MON_OBJ.begin();
   
   if (status_mon < 0) {
-    Serial.println("MPU9250 monitor initialization unsuccessful");
-    Serial.println("Check MPU9250 monitor wiring or try cycling power");
+    Serial.println("Monitor IMU initialization unsuccessful");
+    Serial.println("Check monitor IMU wiring (Wire1) or try cycling power");
     Serial.print("Status: ");
     Serial.println(status_mon);
     while(1) {}
@@ -179,32 +198,13 @@ void monitorIMUinit() {
   
   (void)status_mon; // Suppress unused variable warning // stats on mpu9250 IMU monitor
   
-  // Configure monitor IMU using same range settings as primary IMU (from quad.h)
-  // This ensures consistent scaling for comparison/ground-truth purposes
-  #if defined GYRO_250DPS
-    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_250DPS);
-  #elif defined GYRO_500DPS
-    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_500DPS);
-  #elif defined GYRO_1000DPS
-    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_1000DPS);
-  #elif defined GYRO_2000DPS
-    MON_OBJ.setGyroRange(MON_OBJ.GYRO_RANGE_2000DPS);
-  #endif
+  // Same FS as main IMU: GYRO_MON_SCALE / ACCEL_MON_SCALE track quad.h GYRO_* / ACCEL_*
+  // (main uses GYRO_SCALE_FACTOR / ACCEL_SCALE_FACTOR on MPU6050 raw counts).
+  MON_OBJ.setGyroRange(GYRO_MON_SCALE);
+  MON_OBJ.setAccelRange(ACCEL_MON_SCALE);
   
-  #if defined ACCEL_2G
-    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_2G);
-  #elif defined ACCEL_4G
-    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_4G);
-  #elif defined ACCEL_8G
-    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_8G);
-  #elif defined ACCEL_16G
-    MON_OBJ.setAccelRange(MON_OBJ.ACCEL_RANGE_16G);
-  #endif
-  
-  MON_OBJ.setMagCalX(MagErrorX, MagScaleX);
-  MON_OBJ.setMagCalY(MagErrorY, MagScaleY);
-  MON_OBJ.setMagCalZ(MagErrorZ, MagScaleZ);
-  MON_OBJ.setSrd(0); // 1kHz accel/gyro, 100Hz mag
+  // Magnetometer bias/scale applied once in getIMUdataMonitor() (not in driver).
+  MON_OBJ.setSrd(0); // max rate accel/gyro; mag ~100 Hz on AK09916
   
   // Initialize W5500 Ethernet via SPI
   pinMode(W5500_CS_PIN, OUTPUT);
@@ -242,14 +242,19 @@ void monitorIMUinit() {
   lastUdpSend = 0;
 }
 
-// Read secondary MPU9250 monitor (I2C Wire1) for ground-truth IMU data
+void runMonitorImuLoopStep(float dt) {
+  getIMUdataMonitor();
+  MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, -AccX_mon, AccY_mon, AccZ_mon,
+                  MagY_mon, -MagX_mon, MagZ_mon, dt);
+  sendIMUDataUDP();
+}
+
+// Read monitor IMU (MPU9250 or ICM20948) — MON_OBJ shared API
 void getIMUdataMonitor() {
-  // Read and scale data from monitor IMU using library high-level getters
-  // Accelerometer: m/s^2 -> g's (to match primary IMU units)
-  // Gyro: rad/s -> deg/s (to match primary IMU units)
+  // readSensor() uses FS set in monitorIMUinit (GYRO_MON_SCALE / ACCEL_MON_SCALE).
+  // Convert physical units to g and °/s — same units as main after getIMUdata().
   MON_OBJ.readSensor();
 
-  // Accelerometer (convert to g and apply LP filter like primary IMU)
   float AccX_raw = MON_OBJ.getAccelX_mss() / 9.807f;
   float AccY_raw = MON_OBJ.getAccelY_mss() / 9.807f;
   float AccZ_raw = MON_OBJ.getAccelZ_mss() / 9.807f;
@@ -283,11 +288,12 @@ void getIMUdataMonitor() {
   GyroY_mon_prev = GyroY_mon;
   GyroZ_mon_prev = GyroZ_mon;
 
-  // Magnetometer (apply calibration and LP filter like primary IMU)
+  // Magnetometer: driver returns µT (no setMagCal in init — one correction here, like MPU6050 path).
   float MagX_raw = MON_OBJ.getMagX_uT();
   float MagY_raw = MON_OBJ.getMagY_uT();
   float MagZ_raw = MON_OBJ.getMagZ_uT();
-  MagX_raw = (MagX_raw - MagErrorX)*MagScaleX;
+
+  MagX_raw = (MagX_raw - MagErrorX) * MagScaleX;
   MagY_raw = (MagY_raw - MagErrorY)*MagScaleY;
   MagZ_raw = (MagZ_raw - MagErrorZ)*MagScaleZ;
   MagX_mon = (1.0 - B_mag)*MagX_mon_prev + B_mag*MagX_raw;
@@ -298,13 +304,90 @@ void getIMUdataMonitor() {
   MagZ_mon_prev = MagZ_mon;
 }
 
-// Function declarations
-void monitorIMUinit();
-void getIMUdataMonitor();
-void MadgwickMonitor(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz, float invSampleFreq);
-void Madgwick6DOFMonitor(float gx, float gy, float gz, float ax, float ay, float az, float invSampleFreq);
-void compareAttitude();
-void sendIMUDataUDP();
+// Startup accel/gyro bias (level surface, 10 s). Requires monitorIMUinit() first.
+void calculate_IMU_error_monitor() {
+  float AcX, AcY, AcZ, GyX, GyY, GyZ;
+
+  AccErrorX_mon = 0.0f;
+  AccErrorY_mon = 0.0f;
+  AccErrorZ_mon = 0.0f;
+  GyroErrorX_mon = 0.0f;
+  GyroErrorY_mon = 0.0f;
+  GyroErrorZ_mon = 0.0f;
+
+  Serial.println("Starting MONITOR IMU calibration (MPU9250/ICM20948)...");
+  Serial.println("Keep vehicle level and still for 10 seconds...");
+
+  int c = 0;
+  while (c < 10000) {
+    MON_OBJ.readSensor();
+    AcX = MON_OBJ.getAccelX_mss() / 9.807f;
+    AcY = MON_OBJ.getAccelY_mss() / 9.807f;
+    AcZ = MON_OBJ.getAccelZ_mss() / 9.807f;
+    GyX = MON_OBJ.getGyroX_rads() * 57.29577951f;
+    GyY = MON_OBJ.getGyroY_rads() * 57.29577951f;
+    GyZ = MON_OBJ.getGyroZ_rads() * 57.29577951f;
+
+    AccErrorX_mon  += AcX;
+    AccErrorY_mon  += AcY;
+    AccErrorZ_mon  += AcZ;
+    GyroErrorX_mon += GyX;
+    GyroErrorY_mon += GyY;
+    GyroErrorZ_mon += GyZ;
+    c++;
+    if (c % 1000 == 0) {
+      Serial.print(".");
+    }
+  }
+
+  AccErrorX_mon  /= (float)c;
+  AccErrorY_mon  /= (float)c;
+  AccErrorZ_mon  = AccErrorZ_mon / (float)c - 1.0f;
+  // Cannot use /= here: (a /= x - 1) computes a/(x-1), not (a/x)-1.
+  // Must mirror calculate_IMU_error_main(): subtract 1g (gravity) from Z mean.
+  GyroErrorX_mon /= (float)c;
+  GyroErrorY_mon /= (float)c;
+  GyroErrorZ_mon /= (float)c;
+
+  Serial.println();
+  Serial.println("MONITOR IMU Calibration Parameters:");
+  Serial.print("float AccErrorX_mon = "); Serial.print(AccErrorX_mon); Serial.println(";");
+  Serial.print("float AccErrorY_mon = "); Serial.print(AccErrorY_mon); Serial.println(";");
+  Serial.print("float AccErrorZ_mon = "); Serial.print(AccErrorZ_mon); Serial.println(";");
+  Serial.print("float GyroErrorX_mon = "); Serial.print(GyroErrorX_mon); Serial.println(";");
+  Serial.print("float GyroErrorY_mon = "); Serial.print(GyroErrorY_mon); Serial.println(";");
+  Serial.print("float GyroErrorZ_mon = "); Serial.print(GyroErrorZ_mon); Serial.println(";");
+  Serial.println("Paste into MONITOR section; comment out calculate_IMU_error_monitor() in setup.");
+}
+
+// Interactive mag cal (AK8963 or AK09916 via MON_OBJ.calibrateMag())
+void calibrateMagnetometerMonitor() {
+  Serial.println("Beginning MONITOR IMU (Wire1) magnetometer calibration in");
+  Serial.println("3...");
+  delay(1000);
+  Serial.println("2...");
+  delay(1000);
+  Serial.println("1...");
+  delay(1000);
+  Serial.println("Rotate the MONITOR IMU about all axes until complete.");
+  Serial.println(" ");
+
+  const int success = MON_OBJ.calibrateMag();
+  if (success) {
+    Serial.println("MONITOR IMU Calibration Successful!");
+    Serial.println("Comment out calibrateMagnetometer() and copy:");
+    Serial.print("float MagErrorX = "); Serial.print(MON_OBJ.getMagBiasX_uT()); Serial.println(";");
+    Serial.print("float MagErrorY = "); Serial.print(MON_OBJ.getMagBiasY_uT()); Serial.println(";");
+    Serial.print("float MagErrorZ = "); Serial.print(MON_OBJ.getMagBiasZ_uT()); Serial.println(";");
+    Serial.print("float MagScaleX = "); Serial.print(MON_OBJ.getMagScaleFactorX()); Serial.println(";");
+    Serial.print("float MagScaleY = "); Serial.print(MON_OBJ.getMagScaleFactorY()); Serial.println(";");
+    Serial.print("float MagScaleZ = "); Serial.print(MON_OBJ.getMagScaleFactorZ()); Serial.println(";");
+    Serial.println("Mag params apply in getIMUdataMonitor() for 9-DOF Madgwick.");
+  } else {
+    Serial.println("MONITOR IMU Calibration Unsuccessful. Reset and retry.");
+  }
+  while (1) {}
+}
 
 // Separate Madgwick filter for monitor IMU (ground truth attitude)
 // Always computed for UDP telemetry (both raw sensor and attitude data are sent)
@@ -493,22 +576,6 @@ void Madgwick6DOFMonitor(float gx, float gy, float gz, float ax, float ay, float
   yaw_IMU_mon = -atan2(q1_mon*q2_mon + q0_mon*q3_mon, 0.5f - q2_mon*q2_mon - q3_mon*q3_mon)*57.29577951f;
 }
 
-// Compare control IMU attitude (used for flight control) vs ground truth monitor IMU attitude
-#if defined USE_MONITOR_ATTITUDE_COMPARISON
-void compareAttitude() {
-  // Compute attitude errors: control IMU - ground truth monitor IMU
-  // Positive error means control IMU reads higher angle than ground truth
-  roll_error_mon = roll_IMU - roll_IMU_mon;
-  pitch_error_mon = pitch_IMU - pitch_IMU_mon;
-  
-  // Yaw error needs special handling due to wrap-around at ±180 degrees
-  float yaw_diff = yaw_IMU - yaw_IMU_mon;
-  if (yaw_diff > 180.0f) yaw_diff -= 360.0f;
-  if (yaw_diff < -180.0f) yaw_diff += 360.0f;
-  yaw_error_mon = yaw_diff;
-}
-#endif // USE_MONITOR_ATTITUDE_COMPARISON
-
 // Event detection function to flag command-based attitude changes and disturbances
 // This function analyzes both command inputs and attitude changes to detect different types of flight events
 // Uses bit-field flags for efficient transmission and logging
@@ -529,10 +596,10 @@ void detectEvents() {
   bool commandActive = false;
   
   // Check for command changes (compare current vs previous desired values)
-  float roll_change = abs(roll_des - prev_roll_des);
-  float pitch_change = abs(pitch_des - prev_pitch_des);
-  float yaw_change = abs(yaw_des - prev_yaw_des);
-  float throttle_change = abs(thro_des - prev_thro_des);
+  float roll_change = fabsf(roll_des - prev_roll_des);
+  float pitch_change = fabsf(pitch_des - prev_pitch_des);
+  float yaw_change = fabsf(yaw_des - prev_yaw_des);
+  float throttle_change = fabsf(thro_des - prev_thro_des);
   
   // Flag if any command changed beyond threshold
   if (roll_change > COMMAND_THRESHOLD || pitch_change > COMMAND_THRESHOLD || yaw_change > COMMAND_THRESHOLD) {
@@ -548,28 +615,28 @@ void detectEvents() {
   
   // Check for active commands (beyond center stick position)
   // This helps distinguish between commanded and uncommanded attitude changes
-  if (abs(roll_des) > COMMAND_THRESHOLD) {
+  if (fabsf(roll_des) > COMMAND_THRESHOLD) {
     dataPacket.flags.roll_command = 1;
     commandActive = true;
     eventDetected = true;
   }
   
-  if (abs(pitch_des) > COMMAND_THRESHOLD) {
+  if (fabsf(pitch_des) > COMMAND_THRESHOLD) {
     dataPacket.flags.pitch_command = 1;
     commandActive = true;
     eventDetected = true;
   }
   
-  if (abs(yaw_des) > COMMAND_THRESHOLD) {
+  if (fabsf(yaw_des) > COMMAND_THRESHOLD) {
     dataPacket.flags.yaw_command = 1;
     commandActive = true;
     eventDetected = true;
   }
   
   // Check for attitude changes beyond threshold (actual vs previous attitude)
-  float roll_attitude_change = abs(roll_IMU - prev_roll_IMU);
-  float pitch_attitude_change = abs(pitch_IMU - prev_pitch_IMU);
-  float yaw_attitude_change = abs(yaw_IMU - prev_yaw_IMU);
+  float roll_attitude_change = fabsf(roll_IMU - prev_roll_IMU);
+  float pitch_attitude_change = fabsf(pitch_IMU - prev_pitch_IMU);
+  float yaw_attitude_change = fabsf(yaw_IMU - prev_yaw_IMU);
   
   if (roll_attitude_change > ATTITUDE_THRESHOLD || pitch_attitude_change > ATTITUDE_THRESHOLD || yaw_attitude_change > ATTITUDE_THRESHOLD) {
     dataPacket.flags.attitude_change = 1;
@@ -624,9 +691,6 @@ void detectEvents() {
   }
 }
 
-// Send IMU data via UDP over W5500 Ethernet
-// This function packages both raw sensor data and attitude data with timestamp
-// Both attitude and raw sensor data are ALWAYS sent, regardless of comparison mode setting
 void sendIMUDataUDP() {
   // Rate limit UDP sends to avoid overwhelming network
   unsigned long currentMillis = millis();
@@ -641,12 +705,9 @@ void sendIMUDataUDP() {
   // Populate packet with timestamp
   dataPacket.timestamp_us = micros();
   
-  // Madgwick filter beta parameter from main controller
   dataPacket.B_madgwick = B_madgwick;
-  // Madgwick filter beta parameter for monitor
-  dataPacket.B_madgwick_monitor = B_MADGWICK_MONITOR;
-  
-  // Control IMU raw sensors (MPU6050) - ALWAYS sent
+
+  // --- Control IMU (MPU6050) — separate stream ---
   dataPacket.ctrl_acc_x = AccX;
   dataPacket.ctrl_acc_y = AccY;
   dataPacket.ctrl_acc_z = AccZ;
@@ -657,7 +718,7 @@ void sendIMUDataUDP() {
   dataPacket.ctrl_mag_y = MagY;
   dataPacket.ctrl_mag_z = MagZ;
   
-  // Monitor IMU raw sensors (MPU9250) - ALWAYS sent
+  // --- Monitor IMU (MPU9250 / ICM20948) — separate stream ---
   dataPacket.mon_acc_x = AccX_mon;
   dataPacket.mon_acc_y = AccY_mon;
   dataPacket.mon_acc_z = AccZ_mon;
@@ -668,111 +729,19 @@ void sendIMUDataUDP() {
   dataPacket.mon_mag_y = MagY_mon;
   dataPacket.mon_mag_z = MagZ_mon;
   
-  // Control IMU attitude (from Madgwick filter) - ALWAYS sent
+  // --- Attitudes (each IMU) ---
   dataPacket.ctrl_roll = roll_IMU;
   dataPacket.ctrl_pitch = pitch_IMU;
   dataPacket.ctrl_yaw = yaw_IMU;
   
-  // Monitor IMU attitude (from Madgwick filter) - ALWAYS sent
   dataPacket.mon_roll = roll_IMU_mon;
   dataPacket.mon_pitch = pitch_IMU_mon;
   dataPacket.mon_yaw = yaw_IMU_mon;
-  
-  // Error/difference data - depends on comparison mode
-  #if defined USE_MONITOR_ATTITUDE_COMPARISON
-    // Attitude comparison errors (control - monitor)
-    dataPacket.err_roll = roll_error_mon;
-    dataPacket.err_pitch = pitch_error_mon;
-    dataPacket.err_yaw = yaw_error_mon;
-  #else
-    // Raw sensor differences (reusing error variables for raw sensor differences)
-    dataPacket.err_roll = roll_error_mon;   // Gyro X difference
-    dataPacket.err_pitch = pitch_error_mon; // Gyro Y difference
-    dataPacket.err_yaw = yaw_error_mon;     // Gyro Z difference
-  #endif
-  
-  // Send UDP packet
+
   IPAddress remoteIP(UDP_REMOTE_IP_0, UDP_REMOTE_IP_1, UDP_REMOTE_IP_2, UDP_REMOTE_IP_3);
   Udp.beginPacket(remoteIP, UDP_REMOTE_PORT);
   Udp.write((uint8_t*)&dataPacket, sizeof(IMUDataPacket));
   Udp.endPacket();
 }
 
-// Legacy serial print functions (kept for debugging, but data now sent via UDP)
-#if defined USE_MONITOR_ATTITUDE_COMPARISON
-void printAttitudeComparison() {
-  // Data now sent via UDP - this function kept for compatibility
-  // Uncomment Serial prints below if you want to also print to serial
-  /*
-  if (current_time - print_counter > 10000) {
-    print_counter = micros();
-    Serial.print(F("CTRL: R:"));
-    Serial.print(roll_IMU);
-    Serial.print(F(" P:"));
-    Serial.print(pitch_IMU);
-    Serial.print(F(" Y:"));
-    Serial.print(yaw_IMU);
-    Serial.print(F(" | GT: R:"));
-    Serial.print(roll_IMU_mon);
-    Serial.print(F(" P:"));
-    Serial.print(pitch_IMU_mon);
-    Serial.print(F(" Y:"));
-    Serial.print(yaw_IMU_mon);
-    Serial.print(F(" | ERR: R:"));
-    Serial.print(roll_error_mon);
-    Serial.print(F(" P:"));
-    Serial.print(pitch_error_mon);
-    Serial.print(F(" Y:"));
-    Serial.println(yaw_error_mon);
-  }
-  */
-}
-#else
-// Raw sensor comparison mode (no Madgwick filter on monitor)
-void compareRawSensors() {
-  // Compare raw sensor readings between control and monitor IMUs
-  // This is lighter-weight than attitude comparison but less directly useful for control validation
-  // Differences indicate sensor calibration, noise, or mounting differences
-  float gyro_diff_x = GyroX - GyroX_mon;
-  float gyro_diff_y = GyroY - GyroY_mon;
-  float gyro_diff_z = GyroZ - GyroZ_mon;
-  float accel_diff_x = AccX - AccX_mon;
-  float accel_diff_y = AccY - AccY_mon;
-  float accel_diff_z = AccZ - AccZ_mon;
-  
-  // Store differences in error variables (reusing same variable names for consistency)
-  roll_error_mon = gyro_diff_x;   // Reuse for gyro X difference
-  pitch_error_mon = gyro_diff_y;   // Reuse for gyro Y difference
-  yaw_error_mon = gyro_diff_z;     // Reuse for gyro Z difference
-}
-
-void printRawSensorComparison() {
-  // Data now sent via UDP - this function kept for compatibility
-  // Uncomment Serial prints below if you want to also print to serial
-  /*
-  if (current_time - print_counter > 10000) {
-    print_counter = micros();
-    Serial.print(F("CTRL_Gyro: X:"));
-    Serial.print(GyroX);
-    Serial.print(F(" Y:"));
-    Serial.print(GyroY);
-    Serial.print(F(" Z:"));
-    Serial.print(GyroZ);
-    Serial.print(F(" | MON_Gyro: X:"));
-    Serial.print(GyroX_mon);
-    Serial.print(F(" Y:"));
-    Serial.print(GyroY_mon);
-    Serial.print(F(" Z:"));
-    Serial.print(GyroZ_mon);
-    Serial.print(F(" | Diff: X:"));
-    Serial.print(roll_error_mon);
-    Serial.print(F(" Y:"));
-    Serial.print(pitch_error_mon);
-    Serial.print(F(" Z:"));
-    Serial.println(yaw_error_mon);
-  }
-  */
-}
-#endif // USE_MONITOR_ATTITUDE_COMPARISON
-
-#endif // USE_MPU9250_MONITOR_I2C
+#endif // USE_MPU9250_MONITOR_I2C || USE_ICM20948_MONITOR_I2C
