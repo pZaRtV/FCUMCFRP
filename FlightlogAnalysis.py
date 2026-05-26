@@ -20,7 +20,7 @@ Enhanced with Event Detection and Disturbance Analysis:
 15. Disturbance Detection Statistics
 
 Author: Patrick Andrasena T.
-Version: 2.0 (Enhanced with Event Detection Analysis)
+Version: 2.1 (Enhanced with IBUS Support and Bug Fixes)
 
 ============================================================
 ENHANCED FEATURES - EVENT DETECTION ANALYSIS
@@ -123,6 +123,42 @@ from datetime import datetime
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
+
+# CSV columns from IMUDataPacket v2 (imuMonitor.ino → UDPClient.py)
+TELEMETRY_COLUMN_GROUPS = {
+    'meta': ['timestamp_us', 'event_flags', 'B_madgwick'],
+    'control_raw': [
+        'ctrl_acc_x', 'ctrl_acc_y', 'ctrl_acc_z',
+        'ctrl_gyro_x', 'ctrl_gyro_y', 'ctrl_gyro_z',
+        'ctrl_mag_x', 'ctrl_mag_y', 'ctrl_mag_z',
+    ],
+    'monitor_raw': [
+        'mon_acc_x', 'mon_acc_y', 'mon_acc_z',
+        'mon_gyro_x', 'mon_gyro_y', 'mon_gyro_z',
+        'mon_mag_x', 'mon_mag_y', 'mon_mag_z',
+    ],
+    'control_attitude': ['ctrl_roll', 'ctrl_pitch', 'ctrl_yaw'],
+    'monitor_attitude': ['mon_roll', 'mon_pitch', 'mon_yaw'],
+    'attitude_error': ['err_roll', 'err_pitch', 'err_yaw'],
+    'raw_difference': [
+        'diff_gyro_x', 'diff_gyro_y', 'diff_gyro_z',
+        'diff_acc_x', 'diff_acc_y', 'diff_acc_z',
+    ],
+}
+
+# Columns recorded by Teensy / UDPClient CSV (comparisons derived after load)
+TELEMETRY_LOGGED_COLUMNS = (
+    TELEMETRY_COLUMN_GROUPS['meta']
+    + TELEMETRY_COLUMN_GROUPS['control_raw']
+    + TELEMETRY_COLUMN_GROUPS['monitor_raw']
+    + TELEMETRY_COLUMN_GROUPS['control_attitude']
+    + TELEMETRY_COLUMN_GROUPS['monitor_attitude']
+)
+
+TELEMETRY_DERIVED_COLUMNS = (
+    TELEMETRY_COLUMN_GROUPS['attitude_error']
+    + TELEMETRY_COLUMN_GROUPS['raw_difference']
+)
 
 # Configuration
 DATA_LOGS_DIR = "data_logs"
@@ -228,11 +264,75 @@ def select_log_file():
             return None
 
 
+def derive_comparison_columns(df):
+    """Compute err_* and diff_* from logged per-IMU streams (not sent by Teensy)."""
+    if all(c in df.columns for c in ('ctrl_roll', 'mon_roll', 'ctrl_pitch', 'mon_pitch',
+                                     'ctrl_yaw', 'mon_yaw')):
+        df['err_roll'] = df['ctrl_roll'] - df['mon_roll']
+        df['err_pitch'] = df['ctrl_pitch'] - df['mon_pitch']
+        yaw_diff = df['ctrl_yaw'] - df['mon_yaw']
+        df['err_yaw'] = np.where(yaw_diff > 180, yaw_diff - 360, yaw_diff)
+        df['err_yaw'] = np.where(df['err_yaw'] < -180, df['err_yaw'] + 360, df['err_yaw'])
+
+    for axis in ('x', 'y', 'z'):
+        cg, mg = f'ctrl_gyro_{axis}', f'mon_gyro_{axis}'
+        ca, ma = f'ctrl_acc_{axis}', f'mon_acc_{axis}'
+        if cg in df.columns and mg in df.columns:
+            df[f'diff_gyro_{axis}'] = df[cg] - df[mg]
+        if ca in df.columns and ma in df.columns:
+            df[f'diff_acc_{axis}'] = df[ca] - df[ma]
+    return df
+
+
+def validate_telemetry_columns(df):
+    """Check CSV has per-IMU streams from UDP log (comparisons may be derived)."""
+    missing_logged = [c for c in TELEMETRY_LOGGED_COLUMNS if c not in df.columns]
+    return {
+        'is_complete': len(missing_logged) == 0,
+        'missing_logged': missing_logged,
+        'has_per_imu_raw': all(c in df.columns for c in TELEMETRY_COLUMN_GROUPS['control_raw']
+                               + TELEMETRY_COLUMN_GROUPS['monitor_raw']),
+        'has_per_imu_attitude': all(c in df.columns for c in TELEMETRY_COLUMN_GROUPS['control_attitude']
+                                    + TELEMETRY_COLUMN_GROUPS['monitor_attitude']),
+    }
+
+
+def print_telemetry_column_summary(df, schema):
+    """Summarize logged vs derived telemetry columns."""
+    print("\nTelemetry (UDP CSV = per-IMU only; comparisons derived here):")
+    for group in ('meta', 'control_raw', 'monitor_raw', 'control_attitude', 'monitor_attitude'):
+        cols = TELEMETRY_COLUMN_GROUPS[group]
+        present = [c for c in cols if c in df.columns]
+        print(f"  {group:18s} {len(present)}/{len(cols)} logged")
+    for group in ('attitude_error', 'raw_difference'):
+        cols = TELEMETRY_COLUMN_GROUPS[group]
+        present = [c for c in cols if c in df.columns]
+        print(f"  {group:18s} {len(present)}/{len(cols)} derived")
+    if schema['missing_logged']:
+        print(f"  Warning: missing logged columns: {schema['missing_logged']}")
+    elif schema['has_per_imu_raw'] and schema['has_per_imu_attitude']:
+        print("  Ready for timestamped raw/attitude analysis and derived diffs.")
+
+
 def load_csv_data(csv_path):
-    """Load CSV data into pandas DataFrame"""
+    """Load CSV data into pandas DataFrame with enhanced precision for calibration analysis"""
     try:
         print(f"\nLoading data from: {csv_path}")
-        df = pd.read_csv(csv_path)
+        
+        # Load with explicit float64 precision for maximum accuracy in calibration analysis
+        df = pd.read_csv(csv_path, dtype=np.float64)
+        
+        schema = validate_telemetry_columns(df)
+        print_telemetry_column_summary(df, schema)
+
+        df = derive_comparison_columns(df)
+
+        if not schema['is_complete']:
+            print("Warning: log may be incomplete; expected 117-byte UDP CSV from current firmware.")
+
+        # Set pandas display options for enhanced precision
+        pd.set_option('display.float_format', '{:.8f}'.format)
+        pd.set_option('display.precision', 8)
         
         # Convert timestamp_us to relative time in seconds
         if 'timestamp_us' in df.columns and len(df) > 0:
@@ -298,7 +398,7 @@ def create_analysis_plots(df):
     # err_yaw_max = df['err_yaw'].abs().max()
     
     # Calculate stability metrics
-    metrics = calculate_stability_metrics(df)
+    metrics = calculate_advanced_stability_metrics(df)
     
     # Replace with:
     err_roll_max = df['err_roll'].abs().max()
@@ -386,6 +486,120 @@ def create_analysis_plots(df):
     return fig
 
 
+def create_per_imu_plots(df):
+    """Side-by-side plots: control-only vs monitor-only streams (no differencing)."""
+    if df is None or len(df) == 0 or 'time_s' not in df.columns:
+        return None
+
+    time_data = df['time_s'].values
+    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+    fig.suptitle('Per-IMU Sensor Streams (Control vs Monitor)', fontsize=14, fontweight='bold')
+
+    # Accelerometer
+    for i, (ax_col, label, prefix) in enumerate(zip([0, 1], ['Control (MPU6050)', 'Monitor (9-DOF)'],
+                                                     ['ctrl', 'mon'])):
+        ax = axes[0, ax_col]
+        ax.set_title(f'{label} — Accelerometer (g)')
+        ax.grid(True, alpha=0.3)
+        for axis, color in zip('xyz', 'rgb'):
+            col = f'{prefix}_acc_{axis}'
+            if col in df.columns:
+                ax.plot(time_data, df[col], color=color, label=axis.upper(), linewidth=1.2)
+        ax.legend(loc='upper right', fontsize=8)
+        if ax_col == 0:
+            ax.set_ylabel('g')
+
+    # Gyroscope
+    for i, (ax_col, label, prefix) in enumerate(zip([0, 1], ['Control', 'Monitor'], ['ctrl', 'mon'])):
+        ax = axes[1, ax_col]
+        ax.set_title(f'{label} — Gyroscope (deg/s)')
+        ax.grid(True, alpha=0.3)
+        for axis, color in zip('xyz', 'rgb'):
+            col = f'{prefix}_gyro_{axis}'
+            if col in df.columns:
+                ax.plot(time_data, df[col], color=color, label=axis.upper(), linewidth=1.2)
+        ax.legend(loc='upper right', fontsize=8)
+        if ax_col == 0:
+            ax.set_ylabel('deg/s')
+
+    # Magnetometer (monitor has real mag; control often ~0 with 6-DOF)
+    for i, (ax_col, label, prefix) in enumerate(zip([0, 1], ['Control', 'Monitor'], ['ctrl', 'mon'])):
+        ax = axes[2, ax_col]
+        ax.set_title(f'{label} — Magnetometer (µT)')
+        ax.set_xlabel('Time (s)')
+        ax.grid(True, alpha=0.3)
+        for axis, color in zip('xyz', 'rgb'):
+            col = f'{prefix}_mag_{axis}'
+            if col in df.columns:
+                ax.plot(time_data, df[col], color=color, label=axis.upper(), linewidth=1.2)
+        ax.legend(loc='upper right', fontsize=8)
+        if ax_col == 0:
+            ax.set_ylabel('µT')
+
+    plt.tight_layout()
+    return fig
+
+
+def create_sensor_difference_plots(df):
+    """Raw comparison deltas (diff_*) and optional derived diffs for legacy logs."""
+    if df is None or len(df) == 0 or 'time_s' not in df.columns:
+        return None
+
+    time_data = df['time_s'].values
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+    fig.suptitle('Sensor Comparison (Control − Monitor)', fontsize=14, fontweight='bold')
+
+    # Attitude error
+    ax = axes[0, 0]
+    ax.set_title('Attitude error (deg)')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='k', linestyle='--', alpha=0.4)
+    for axis, color in zip(['roll', 'pitch', 'yaw'], 'rgb'):
+        col = f'err_{axis}'
+        if col in df.columns:
+            ax.plot(time_data, df[col], color=color, label=axis.capitalize(), linewidth=1.2)
+    ax.legend(fontsize=8)
+
+    # Gyro diff
+    ax = axes[0, 1]
+    ax.set_title('Gyro difference (deg/s)')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='k', linestyle='--', alpha=0.4)
+    for axis, color in zip(['x', 'y', 'z'], 'rgb'):
+        col = f'diff_gyro_{axis}'
+        if col in df.columns:
+            ax.plot(time_data, df[col], color=color, label=axis.upper(), linewidth=1.2)
+    ax.legend(fontsize=8)
+
+    # Accel diff
+    ax = axes[1, 0]
+    ax.set_title('Accelerometer difference (g)')
+    ax.set_xlabel('Time (s)')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='k', linestyle='--', alpha=0.4)
+    for axis, color in zip(['x', 'y', 'z'], 'rgb'):
+        col = f'diff_acc_{axis}'
+        if col in df.columns:
+            ax.plot(time_data, df[col], color=color, label=axis.upper(), linewidth=1.2)
+    ax.legend(fontsize=8)
+
+    # Per-IMU attitudes overlaid
+    ax = axes[1, 1]
+    ax.set_title('Attitude — both IMUs')
+    ax.set_xlabel('Time (s)')
+    ax.grid(True, alpha=0.3)
+    for col, style, lbl in [
+        ('ctrl_roll', '-', 'Ctrl R'), ('mon_roll', '--', 'Mon R'),
+        ('ctrl_pitch', '-', 'Ctrl P'), ('mon_pitch', '--', 'Mon P'),
+    ]:
+        if col in df.columns:
+            ax.plot(time_data, df[col], linestyle=style, linewidth=1.0, alpha=0.85, label=lbl)
+    ax.legend(fontsize=7, ncol=2)
+
+    plt.tight_layout()
+    return fig
+
+
 def calculate_mae(series):
     """Calculate Mean Absolute Error"""
     return series.abs().mean()
@@ -458,7 +672,10 @@ def validate_data_integrity(df):
         'mon_gyro_x': (-2000, 2000), 'mon_gyro_y': (-2000, 2000), 'mon_gyro_z': (-2000, 2000),
         'ctrl_roll': (-180, 180), 'ctrl_pitch': (-90, 90), 'ctrl_yaw': (-180, 180),
         'mon_roll': (-180, 180), 'mon_pitch': (-90, 90), 'mon_yaw': (-180, 180),
-        'err_roll': (-10, 10), 'err_pitch': (-10, 10), 'err_yaw': (-10, 10)
+        'err_roll': (-10, 10), 'err_pitch': (-10, 10), 'err_yaw': (-10, 10),
+        'diff_gyro_x': (-500, 500), 'diff_gyro_y': (-500, 500), 'diff_gyro_z': (-500, 500),
+        'diff_acc_x': (-4, 4), 'diff_acc_y': (-4, 4), 'diff_acc_z': (-4, 4),
+        'mon_mag_x': (-200, 200), 'mon_mag_y': (-200, 200), 'mon_mag_z': (-200, 200),
     }
     
     for col, (min_val, max_val) in range_checks.items():
@@ -476,7 +693,10 @@ def validate_data_integrity(df):
             integrity_report['timestamp_gaps'] = large_gaps.tolist()
     
     # Check for sensor anomalies (stuck values, excessive noise)
-    sensor_cols = ['ctrl_acc_x', 'ctrl_acc_y', 'ctrl_acc_z', 'ctrl_gyro_x', 'ctrl_gyro_y', 'ctrl_gyro_z']
+    sensor_cols = (
+        TELEMETRY_COLUMN_GROUPS['control_raw']
+        + TELEMETRY_COLUMN_GROUPS['monitor_raw']
+    )
     for col in sensor_cols:
         if col in df.columns:
             # Check for stuck values (low variance)
@@ -624,6 +844,428 @@ def calculate_cross_correlation_metrics(df):
     return correlation_metrics
 
 
+def analyze_madgwick_beta_correlation(df, stability_metrics):
+    """Analyze correlation between B_madgwick parameter and stability metrics"""
+    if 'B_madgwick' not in df.columns:
+        print("Warning: B_madgwick parameter not found in data")
+        return {}
+    
+    # Get unique B_madgwick values (should be constant per flight)
+    B_values = df['B_madgwick'].unique()
+    
+    if len(B_values) == 1:
+        # Single B_madgwick value for entire flight
+        B_value = B_values[0]
+        print(f"\nMadgwick Filter Beta Parameter Analysis:")
+        print(f"  B_madgwick: {B_value:.4f}")
+        
+        # Analyze stability metrics in context of B_madgwick value
+        correlation_analysis = {
+            'B_madgwick': B_value,
+            'analysis_type': 'single_value',
+            'stability_assessment': {}
+        }
+        
+        # Assess stability based on B_madgwick value
+        for axis in ['roll', 'pitch', 'yaw']:
+            if axis in stability_metrics:
+                mae = stability_metrics[axis].get('mae', 0)
+                rmse = stability_metrics[axis].get('rmse', 0)
+                std = stability_metrics[axis].get('std', 0)
+                snr = stability_metrics[axis].get('snr', 0)
+                
+                # Stability assessment based on B_madgwick
+                if B_value < 0.02:
+                    stability_level = "Very Aggressive (low filtering)"
+                    recommendation = "Consider increasing B for better noise rejection"
+                elif B_value < 0.04:
+                    stability_level = "Aggressive (fast response)"
+                    recommendation = "Good for acrobatic flight, monitor for noise"
+                elif B_value < 0.08:
+                    stability_level = "Balanced (default)"
+                    recommendation = "Good compromise between response and filtering"
+                elif B_value < 0.15:
+                    stability_level = "Conservative (strong filtering)"
+                    recommendation = "Good for stable flight, may reduce responsiveness"
+                else:
+                    stability_level = "Very Conservative (heavy filtering)"
+                    recommendation = "May be too slow for responsive control"
+                
+                correlation_analysis['stability_assessment'][axis] = {
+                    'stability_level': stability_level,
+                    'recommendation': recommendation,
+                    'mae': mae,
+                    'rmse': rmse,
+                    'std': std,
+                    'snr': snr,
+                    'performance_rating': _rate_performance(mae, rmse, std, snr)
+                }
+        
+        return correlation_analysis
+    
+    else:
+        # Multiple B_madgwick values (parameter tuning during flight)
+        print(f"\nMadgwick Filter Beta Parameter Analysis:")
+        print(f"  B_madgwick range: {B_values.min():.4f} - {B_values.max():.4f}")
+        print(f"  Number of different values: {len(B_values)}")
+        
+        correlation_analysis = {
+            'B_madgwick_range': [B_values.min(), B_values.max()],
+            'B_madgwick_values': B_values.tolist(),
+            'analysis_type': 'multi_value',
+            'correlations': {}
+        }
+        
+        # Analyze correlation between B_madgwick and stability metrics
+        for axis in ['roll', 'pitch', 'yaw']:
+            if axis in stability_metrics:
+                # Group by B_madgwick values and calculate average stability metrics
+                b_correlations = []
+                for B_val in B_values:
+                    mask = df['B_madgwick'] == B_val
+                    if mask.sum() > 10:  # Need sufficient data points
+                        subset = df[mask]
+                        error_col = f'err_{axis}'
+                        
+                        if error_col in subset.columns:
+                            mae = np.mean(np.abs(subset[error_col]))
+                            rmse = np.sqrt(np.mean(subset[error_col]**2))
+                            std = np.std(subset[error_col])
+                            
+                            b_correlations.append({
+                                'B_madgwick': B_val,
+                                'mae': mae,
+                                'rmse': rmse,
+                                'std': std,
+                                'sample_count': len(subset)
+                            })
+                
+                if b_correlations:
+                    # Calculate correlation coefficients
+                    B_vals = [item['B_madgwick'] for item in b_correlations]
+                    mae_vals = [item['mae'] for item in b_correlations]
+                    rmse_vals = [item['rmse'] for item in b_correlations]
+                    std_vals = [item['std'] for item in b_correlations]
+                    
+                    if len(B_vals) > 1:
+                        mae_corr = np.corrcoef(B_vals, mae_vals)[0, 1]
+                        rmse_corr = np.corrcoef(B_vals, rmse_vals)[0, 1]
+                        std_corr = np.corrcoef(B_vals, std_vals)[0, 1]
+                        
+                        correlation_analysis['correlations'][axis] = {
+                            'mae_correlation': mae_corr if not np.isnan(mae_corr) else 0,
+                            'rmse_correlation': rmse_corr if not np.isnan(rmse_corr) else 0,
+                            'std_correlation': std_corr if not np.isnan(std_corr) else 0,
+                            'data_points': b_correlations
+                        }
+                        
+                        # Interpret correlations
+                        if mae_corr > 0.5:
+                            interpretation = "Higher B values increase error (consider reducing B)"
+                        elif mae_corr < -0.5:
+                            interpretation = "Higher B values reduce error (consider increasing B)"
+                        else:
+                            interpretation = "Weak correlation between B and stability"
+                        
+                        correlation_analysis['correlations'][axis]['interpretation'] = interpretation
+        
+        return correlation_analysis
+
+
+def _rate_performance(mae, rmse, std, snr):
+    """Rate overall performance based on stability metrics"""
+    # Normalize metrics (lower is better for mae, rmse, std; higher is better for snr)
+    mae_score = max(0, 1 - mae / 5.0)  # Assume 5° is poor performance
+    rmse_score = max(0, 1 - rmse / 8.0)  # Assume 8° is poor performance
+    std_score = max(0, 1 - std / 3.0)   # Assume 3° is poor performance
+    snr_score = min(1, snr / 20.0)        # Assume 20dB is excellent
+    
+    overall_score = (mae_score + rmse_score + std_score + snr_score) / 4
+    
+    if overall_score > 0.8:
+        return "Excellent"
+    elif overall_score > 0.6:
+        return "Good"
+    elif overall_score > 0.4:
+        return "Fair"
+    else:
+        return "Poor"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OFFLINE MADGWICK BETA SWEEP — replay logged raw data at multiple β values
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _madgwick6DOF_step(q, gx_dps, gy_dps, gz_dps, ax, ay, az, beta, dt):
+    """Single Madgwick 6-DOF filter step — float32 precision to match Teensy FPU.
+
+    All arithmetic uses np.float32 to reproduce the same rounding behavior as
+    the Cortex-M7 single-precision FPU running Madgwick6DOF() in firmware.
+
+    Args:
+        q:     numpy float32 array [q0, q1, q2, q3] — modified in-place
+        gx/gy/gz_dps: gyro in deg/s (float32)
+        ax/ay/az:     accel in g (float32)
+        beta:  Madgwick filter gain (float32)
+        dt:    time-step in seconds (float32)
+
+    Returns:
+        (roll, pitch, yaw) in degrees (float32) — same NWU convention as firmware
+    """
+    F = np.float32  # shorthand for casting
+
+    # Convert gyro deg/s → rad/s (same constant as firmware: 0.0174533f)
+    gx = F(gx_dps) * F(0.0174533)
+    gy = F(gy_dps) * F(0.0174533)
+    gz = F(gz_dps) * F(0.0174533)
+
+    ax = F(ax); ay = F(ay); az = F(az)
+    beta = F(beta); dt = F(dt)
+
+    q0 = q[0]; q1 = q[1]; q2 = q[2]; q3 = q[3]
+
+    # Rate of change of quaternion from gyroscope
+    qDot1 = F(0.5) * (-q1 * gx - q2 * gy - q3 * gz)
+    qDot2 = F(0.5) * ( q0 * gx + q2 * gz - q3 * gy)
+    qDot3 = F(0.5) * ( q0 * gy - q1 * gz + q3 * gx)
+    qDot4 = F(0.5) * ( q0 * gz + q1 * gy - q2 * gx)
+
+    # Compute feedback only if accelerometer measurement valid
+    if not (ax == F(0.0) and ay == F(0.0) and az == F(0.0)):
+        # Normalise accelerometer — 1.0f/sqrtf(x) matching firmware invSqrt
+        recipNorm = F(1.0) / F(np.sqrt(F(ax*ax + ay*ay + az*az)))
+        ax *= recipNorm; ay *= recipNorm; az *= recipNorm
+
+        # Auxiliary variables
+        _2q0 = F(2.0)*q0; _2q1 = F(2.0)*q1; _2q2 = F(2.0)*q2; _2q3 = F(2.0)*q3
+        _4q0 = F(4.0)*q0; _4q1 = F(4.0)*q1; _4q2 = F(4.0)*q2
+        _8q1 = F(8.0)*q1; _8q2 = F(8.0)*q2
+        q0q0 = q0*q0; q1q1 = q1*q1; q2q2 = q2*q2; q3q3 = q3*q3
+
+        # Gradient descent corrective step
+        s0 = _4q0*q2q2 + _2q2*ax + _4q0*q1q1 - _2q1*ay
+        s1 = _4q1*q3q3 - _2q3*ax + F(4.0)*q0q0*q1 - _2q0*ay - _4q1 + _8q1*q1q1 + _8q1*q2q2 + _4q1*az
+        s2 = F(4.0)*q0q0*q2 + _2q0*ax + _4q2*q3q3 - _2q3*ay - _4q2 + _8q2*q1q1 + _8q2*q2q2 + _4q2*az
+        s3 = F(4.0)*q1q1*q3 - _2q1*ax + F(4.0)*q2q2*q3 - _2q2*ay
+
+        recipNorm = F(1.0) / F(np.sqrt(F(s0*s0 + s1*s1 + s2*s2 + s3*s3)))
+        s0 *= recipNorm; s1 *= recipNorm; s2 *= recipNorm; s3 *= recipNorm
+
+        # Apply feedback step
+        qDot1 -= beta * s0
+        qDot2 -= beta * s1
+        qDot3 -= beta * s2
+        qDot4 -= beta * s3
+
+    # Integrate rate of change
+    q0 += qDot1 * dt
+    q1 += qDot2 * dt
+    q2 += qDot3 * dt
+    q3 += qDot4 * dt
+
+    # Normalise quaternion
+    recipNorm = F(1.0) / F(np.sqrt(F(q0*q0 + q1*q1 + q2*q2 + q3*q3)))
+    q0 *= recipNorm; q1 *= recipNorm; q2 *= recipNorm; q3 *= recipNorm
+
+    # Update quaternion array in-place (stays float32)
+    q[0] = q0; q[1] = q1; q[2] = q2; q[3] = q3
+
+    # Compute Euler angles — same NWU convention as firmware
+    # atan2/asin return float64; cast back to float32 to match firmware truncation
+    roll  = F(np.arctan2(F(q0*q1 + q2*q3), F(0.5) - q1*q1 - q2*q2)) * F(57.29577951)
+    pitch = F(-np.arcsin(np.clip(F(-2.0)*(q1*q3 - q0*q2), F(-0.999999), F(0.999999)))) * F(57.29577951)
+    yaw   = F(-np.arctan2(F(q1*q2 + q0*q3), F(0.5) - q2*q2 - q3*q3)) * F(57.29577951)
+
+    return roll, pitch, yaw
+
+
+def sweep_madgwick_beta(df, beta_values=None):
+    """Replay logged control IMU raw sensor data through Madgwick6DOF at multiple beta values.
+
+    Uses the monitor attitude (fixed-beta reference) as ground truth to compute
+    per-axis MAE, RMSE, and settling time for each candidate beta. This lets a
+    single flight session produce a complete beta-vs-stability correlation curve.
+
+    Args:
+        df:           DataFrame with logged telemetry (must contain ctrl_acc_*, ctrl_gyro_*,
+                      mon_roll/pitch/yaw, and timestamp_us columns)
+        beta_values:  list of beta values to sweep (default: 11 points from 0.01 to 0.20)
+
+    Returns:
+        dict with keys:
+          'beta_values': list of beta values tested
+          'results':     dict[beta] -> {axis -> {mae, rmse, std, settling_5pct}}
+          'optimal':     {axis -> best beta by MAE}
+    """
+    if beta_values is None:
+        beta_values = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.15, 0.20]
+
+    required_cols = ['ctrl_acc_x', 'ctrl_acc_y', 'ctrl_acc_z',
+                     'ctrl_gyro_x', 'ctrl_gyro_y', 'ctrl_gyro_z',
+                     'mon_roll', 'mon_pitch', 'mon_yaw', 'timestamp_us']
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        print(f"  ⚠ Cannot run beta sweep — missing columns: {missing}")
+        return None
+
+    # Pre-extract numpy arrays as float32 (matching Teensy single-precision)
+    acc_x  = df['ctrl_acc_x'].values.astype(np.float32)
+    acc_y  = df['ctrl_acc_y'].values.astype(np.float32)
+    acc_z  = df['ctrl_acc_z'].values.astype(np.float32)
+    gyro_x = df['ctrl_gyro_x'].values.astype(np.float32)
+    gyro_y = df['ctrl_gyro_y'].values.astype(np.float32)
+    gyro_z = df['ctrl_gyro_z'].values.astype(np.float32)
+    mon_roll  = df['mon_roll'].values
+    mon_pitch = df['mon_pitch'].values
+    mon_yaw   = df['mon_yaw'].values
+    timestamps = df['timestamp_us'].values
+
+    n = len(df)
+    results = {}
+
+    print(f"\n  Running Madgwick6DOF replay (float32) across {len(beta_values)} beta values ({n} samples each)...")
+
+    for beta in beta_values:
+        q = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # Reset quaternion (float32)
+        replay_roll  = np.zeros(n, dtype=np.float32)
+        replay_pitch = np.zeros(n, dtype=np.float32)
+        replay_yaw   = np.zeros(n, dtype=np.float32)
+
+        for i in range(n):
+            if i == 0:
+                dt = np.float32(0.0005)  # Assume 2kHz for first sample
+            else:
+                dt = np.float32((timestamps[i] - timestamps[i-1]) / 1e6)
+                dt = np.clip(dt, np.float32(0.0001), np.float32(0.01))
+
+            roll, pitch, yaw = _madgwick6DOF_step(
+                q, gyro_x[i], gyro_y[i], gyro_z[i],
+                acc_x[i], acc_y[i], acc_z[i], beta, dt
+            )
+            replay_roll[i]  = roll
+            replay_pitch[i] = pitch
+            replay_yaw[i]   = yaw
+
+        # Compare replay against monitor (fixed-beta reference)
+        axis_results = {}
+        for axis, replay, mon in [('roll', replay_roll, mon_roll),
+                                   ('pitch', replay_pitch, mon_pitch),
+                                   ('yaw', replay_yaw, mon_yaw)]:
+            err = replay - mon
+            # Handle yaw wrapping
+            if axis == 'yaw':
+                err = (err + 180) % 360 - 180
+
+            mae  = np.mean(np.abs(err))
+            rmse = np.sqrt(np.mean(err**2))
+            std  = np.std(err)
+
+            # Settling time (5% of steady-state range)
+            ss_range = np.ptp(mon)  # peak-to-peak of reference
+            threshold = 0.05 * ss_range if ss_range > 0.1 else 0.5
+            settled_mask = np.abs(err) < threshold
+            settling_time = None
+            if np.any(settled_mask):
+                # Find first index where error stays below threshold for 100+ samples
+                for start_idx in range(len(settled_mask)):
+                    if settled_mask[start_idx]:
+                        window_end = min(start_idx + 100, len(settled_mask))
+                        if np.all(settled_mask[start_idx:window_end]):
+                            settling_time = (timestamps[start_idx] - timestamps[0]) / 1e6
+                            break
+
+            axis_results[axis] = {
+                'mae': mae,
+                'rmse': rmse,
+                'std': std,
+                'settling_time_5pct': settling_time
+            }
+
+        results[beta] = axis_results
+        print(f"    β={beta:.3f}  →  MAE: roll={axis_results['roll']['mae']:.3f}° "
+              f"pitch={axis_results['pitch']['mae']:.3f}° yaw={axis_results['yaw']['mae']:.3f}°")
+
+    # Find optimal beta per axis (minimum MAE)
+    optimal = {}
+    for axis in ['roll', 'pitch', 'yaw']:
+        best_beta = min(beta_values, key=lambda b: results[b][axis]['mae'])
+        optimal[axis] = {
+            'beta': best_beta,
+            'mae': results[best_beta][axis]['mae'],
+            'rmse': results[best_beta][axis]['rmse']
+        }
+    
+    print(f"\n  Optimal beta values (by MAE):")
+    for axis in ['roll', 'pitch', 'yaw']:
+        o = optimal[axis]
+        print(f"    {axis:>5s}: β={o['beta']:.3f}  (MAE={o['mae']:.3f}°, RMSE={o['rmse']:.3f}°)")
+
+    return {
+        'beta_values': beta_values,
+        'results': results,
+        'optimal': optimal
+    }
+
+
+def plot_beta_sweep_results(sweep_results, plots_dir=None):
+    """Generate beta-vs-metric correlation plots from sweep results.
+
+    Creates a 2x2 figure:
+      Top-left:     MAE vs beta (per axis)
+      Top-right:    RMSE vs beta (per axis)
+      Bottom-left:  Std Dev vs beta (per axis)
+      Bottom-right: Settling time vs beta (per axis)
+
+    Returns the matplotlib Figure.
+    """
+    if sweep_results is None:
+        return None
+
+    betas = sweep_results['beta_values']
+    results = sweep_results['results']
+    optimal = sweep_results['optimal']
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Madgwick Beta Parameter Sweep — Offline Replay Analysis', fontsize=14, fontweight='bold')
+
+    colors = {'roll': '#e74c3c', 'pitch': '#2ecc71', 'yaw': '#3498db'}
+    metrics_config = [
+        ('mae',  'Mean Absolute Error (°)', axes[0, 0]),
+        ('rmse', 'Root Mean Square Error (°)', axes[0, 1]),
+        ('std',  'Standard Deviation (°)', axes[1, 0]),
+        ('settling_time_5pct', 'Settling Time 5% (s)', axes[1, 1]),
+    ]
+
+    for metric_key, ylabel, ax in metrics_config:
+        for axis in ['roll', 'pitch', 'yaw']:
+            values = [results[b][axis][metric_key] for b in betas]
+            # Replace None settling times with NaN for plotting
+            values = [v if v is not None else np.nan for v in values]
+            ax.plot(betas, values, 'o-', color=colors[axis], label=axis.capitalize(), linewidth=1.5, markersize=5)
+
+            # Mark optimal point (for MAE only)
+            if metric_key == 'mae':
+                opt_beta = optimal[axis]['beta']
+                opt_val = optimal[axis]['mae']
+                ax.axvline(opt_beta, color=colors[axis], linestyle='--', alpha=0.3)
+                ax.plot(opt_beta, opt_val, '*', color=colors[axis], markersize=14, zorder=5)
+
+        ax.set_xlabel('Beta (β)')
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xscale('log')
+
+    fig.tight_layout()
+
+    if plots_dir:
+        path = os.path.join(plots_dir, 'beta_sweep_analysis.png')
+        fig.savefig(path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"  Beta sweep plot saved to: {path}")
+
+    return fig
+
+
 def calculate_stability_metrics(df):
     """Calculate comprehensive stability validation metrics for attitude errors"""
     # Use advanced metrics function
@@ -639,40 +1281,50 @@ def print_data_statistics(df):
     # Calculate stability metrics
     metrics = calculate_stability_metrics(df)
     
-    # Attitude statistics
+    # Attitude statistics - Enhanced precision for calibration analysis
     print("\nAttitude (Control IMU):")
-    print(f"  Roll:  mean={df['ctrl_roll'].mean():7.3f}°, std={df['ctrl_roll'].std():7.3f}°, "
-          f"min={df['ctrl_roll'].min():7.3f}°, max={df['ctrl_roll'].max():7.3f}°")
-    print(f"  Pitch: mean={df['ctrl_pitch'].mean():7.3f}°, std={df['ctrl_pitch'].std():7.3f}°, "
-          f"min={df['ctrl_pitch'].min():7.3f}°, max={df['ctrl_pitch'].max():7.3f}°")
-    print(f"  Yaw:   mean={df['ctrl_yaw'].mean():7.3f}°, std={df['ctrl_yaw'].std():7.3f}°, "
-          f"min={df['ctrl_yaw'].min():7.3f}°, max={df['ctrl_yaw'].max():7.3f}°")
+    print(f"  Roll:  mean={df['ctrl_roll'].mean():10.6f}°, std={df['ctrl_roll'].std():10.6f}°, "
+          f"min={df['ctrl_roll'].min():10.6f}°, max={df['ctrl_roll'].max():10.6f}°")
+    print(f"  Pitch: mean={df['ctrl_pitch'].mean():10.6f}°, std={df['ctrl_pitch'].std():10.6f}°, "
+          f"min={df['ctrl_pitch'].min():10.6f}°, max={df['ctrl_pitch'].max():10.6f}°")
+    print(f"  Yaw:   mean={df['ctrl_yaw'].mean():10.6f}°, std={df['ctrl_yaw'].std():10.6f}°, "
+          f"min={df['ctrl_yaw'].min():10.6f}°, max={df['ctrl_yaw'].max():10.6f}°")
     
     print("\nAttitude (Monitor IMU):")
-    print(f"  Roll:  mean={df['mon_roll'].mean():7.3f}°, std={df['mon_roll'].std():7.3f}°, "
-          f"min={df['mon_roll'].min():7.3f}°, max={df['mon_roll'].max():7.3f}°")
-    print(f"  Pitch: mean={df['mon_pitch'].mean():7.3f}°, std={df['mon_pitch'].std():7.3f}°, "
-          f"min={df['mon_pitch'].min():7.3f}°, max={df['mon_pitch'].max():7.3f}°")
-    print(f"  Yaw:   mean={df['mon_yaw'].mean():7.3f}°, std={df['mon_yaw'].std():7.3f}°, "
-          f"min={df['mon_yaw'].min():7.3f}°, max={df['mon_yaw'].max():7.3f}°")
+    print(f"  Roll:  mean={df['mon_roll'].mean():10.6f}°, std={df['mon_roll'].std():10.6f}°, "
+          f"min={df['mon_roll'].min():10.6f}°, max={df['mon_roll'].max():10.6f}°")
+    print(f"  Pitch: mean={df['mon_pitch'].mean():10.6f}°, std={df['mon_pitch'].std():10.6f}°, "
+          f"min={df['mon_pitch'].min():10.6f}°, max={df['mon_pitch'].max():10.6f}°")
+    print(f"  Yaw:   mean={df['mon_yaw'].mean():10.6f}°, std={df['mon_yaw'].std():10.6f}°, "
+          f"min={df['mon_yaw'].min():10.6f}°, max={df['mon_yaw'].max():10.6f}°")
     
     print("\nAttitude Errors (Control - Monitor):")
-    print(f"  Roll:  mean={df['err_roll'].mean():7.3f}°, std={metrics['roll']['std']:7.3f}°, "
-          f"max_abs={df['err_roll'].abs().max():7.3f}°")
-    print(f"  Pitch: mean={df['err_pitch'].mean():7.3f}°, std={metrics['pitch']['std']:7.3f}°, "
-          f"max_abs={df['err_pitch'].abs().max():7.3f}°")
-    print(f"  Yaw:   mean={df['err_yaw'].mean():7.3f}°, std={metrics['yaw']['std']:7.3f}°, "
-          f"max_abs={df['err_yaw'].abs().max():7.3f}°")
+    print(f"  Roll:  mean={df['err_roll'].mean():10.6f}°, std={metrics['roll']['std']:10.6f}°, "
+          f"max_abs={df['err_roll'].abs().max():10.6f}°")
+    print(f"  Pitch: mean={df['err_pitch'].mean():10.6f}°, std={metrics['pitch']['std']:10.6f}°, "
+          f"max_abs={df['err_pitch'].abs().max():10.6f}°")
+    print(f"  Yaw:   mean={df['err_yaw'].mean():10.6f}°, std={metrics['yaw']['std']:10.6f}°, "
+          f"max_abs={df['err_yaw'].abs().max():10.6f}°")
     
-    print("\nAccelerometer (Control IMU):")
-    print(f"  X: mean={df['ctrl_acc_x'].mean():7.3f}g, std={df['ctrl_acc_x'].std():7.3f}g")
-    print(f"  Y: mean={df['ctrl_acc_y'].mean():7.3f}g, std={df['ctrl_acc_y'].std():7.3f}g")
-    print(f"  Z: mean={df['ctrl_acc_z'].mean():7.3f}g, std={df['ctrl_acc_z'].std():7.3f}g")
+    print("\nAccelerometer (Control IMU) - Enhanced Precision:")
+    print(f"  X: mean={df['ctrl_acc_x'].mean():10.6f}g, std={df['ctrl_acc_x'].std():10.6f}g")
+    print(f"  Y: mean={df['ctrl_acc_y'].mean():10.6f}g, std={df['ctrl_acc_y'].std():10.6f}g")
+    print(f"  Z: mean={df['ctrl_acc_z'].mean():10.6f}g, std={df['ctrl_acc_z'].std():10.6f}g")
     
-    print("\nGyroscope (Control IMU):")
-    print(f"  X: mean={df['ctrl_gyro_x'].mean():7.3f}°/s, std={df['ctrl_gyro_x'].std():7.3f}°/s")
-    print(f"  Y: mean={df['ctrl_gyro_y'].mean():7.3f}°/s, std={df['ctrl_gyro_y'].std():7.3f}°/s")
-    print(f"  Z: mean={df['ctrl_gyro_z'].mean():7.3f}°/s, std={df['ctrl_gyro_z'].std():7.3f}°/s")
+    print("\nGyroscope (Control IMU) - Enhanced Precision:")
+    print(f"  X: mean={df['ctrl_gyro_x'].mean():10.6f}°/s, std={df['ctrl_gyro_x'].std():10.6f}°/s")
+    print(f"  Y: mean={df['ctrl_gyro_y'].mean():10.6f}°/s, std={df['ctrl_gyro_y'].std():10.6f}°/s")
+    print(f"  Z: mean={df['ctrl_gyro_z'].mean():10.6f}°/s, std={df['ctrl_gyro_z'].std():10.6f}°/s")
+    
+    print("\nAccelerometer (Monitor IMU) - Enhanced Precision:")
+    print(f"  X: mean={df['mon_acc_x'].mean():10.6f}g, std={df['mon_acc_x'].std():10.6f}g")
+    print(f"  Y: mean={df['mon_acc_y'].mean():10.6f}g, std={df['mon_acc_y'].std():10.6f}g")
+    print(f"  Z: mean={df['mon_acc_z'].mean():10.6f}g, std={df['mon_acc_z'].std():10.6f}g")
+    
+    print("\nGyroscope (Monitor IMU) - Enhanced Precision:")
+    print(f"  X: mean={df['mon_gyro_x'].mean():10.6f}°/s, std={df['mon_gyro_x'].std():10.6f}°/s")
+    print(f"  Y: mean={df['mon_gyro_y'].mean():10.6f}°/s, std={df['mon_gyro_y'].std():10.6f}°/s")
+    print(f"  Z: mean={df['mon_gyro_z'].mean():10.6f}°/s, std={df['mon_gyro_z'].std():10.6f}°/s")
     
     print("=" * 70)
 
@@ -845,7 +1497,23 @@ def save_enhanced_plots(fig, df, plots_dir, metrics, integrity_report):
         saved_plots['correlation'] = corr_plot_path
         plt.close(correlation_fig)
     
-    # 5. Frequency analysis plot
+    # 5. Per-IMU separate streams
+    per_imu_fig = create_per_imu_plots(df)
+    if per_imu_fig:
+        per_imu_path = os.path.join(plots_dir, "per_imu_streams.png")
+        per_imu_fig.savefig(per_imu_path, dpi=300, bbox_inches='tight', facecolor='white')
+        saved_plots['per_imu'] = per_imu_path
+        plt.close(per_imu_fig)
+
+    # 6. Sensor difference / comparison
+    diff_fig = create_sensor_difference_plots(df)
+    if diff_fig:
+        diff_plot_path = os.path.join(plots_dir, "sensor_comparison.png")
+        diff_fig.savefig(diff_plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+        saved_plots['sensor_comparison'] = diff_plot_path
+        plt.close(diff_fig)
+
+    # 7. Frequency analysis plot
     freq_fig = create_frequency_analysis_plot(df, metrics)
     if freq_fig:
         freq_plot_path = os.path.join(plots_dir, "frequency_analysis.png")
@@ -1119,7 +1787,7 @@ def create_frequency_analysis_plot(df, metrics):
     return fig
 
 
-def save_comprehensive_report(csv_path, metrics, df, integrity_report, correlation_metrics, report_dir, saved_plots):
+def save_comprehensive_report(csv_path, metrics, df, integrity_report, correlation_metrics, madgwick_analysis, report_dir, saved_plots):
     """Save comprehensive stability and integrity report to a text file"""
     report_path = os.path.join(report_dir, "comprehensive_stability_report.txt")
     
@@ -1244,6 +1912,48 @@ def save_comprehensive_report(csv_path, metrics, df, integrity_report, correlati
                             f.write(f"  {sensor.upper()} {axis.upper()}: {correlation_metrics[key]:.6f}\n")
                 f.write("\n")
             
+            # Madgwick Beta Parameter Analysis
+            if madgwick_analysis:
+                f.write("=" * 70 + "\n")
+                f.write("Madgwick Filter Beta Parameter Analysis\n")
+                f.write("=" * 70 + "\n\n")
+                
+                if madgwick_analysis.get('analysis_type') == 'single_value':
+                    B_val = madgwick_analysis['B_madgwick']
+                    f.write(f"Filter Beta Parameter: {B_val:.4f}\n")
+                    f.write("Analysis Type: Single value (constant during flight)\n\n")
+                    
+                    f.write("Stability Assessment by Axis:\n")
+                    for axis in ['roll', 'pitch', 'yaw']:
+                        if axis in madgwick_analysis['stability_assessment']:
+                            assessment = madgwick_analysis['stability_assessment'][axis]
+                            f.write(f"  {axis.upper()}:\n")
+                            f.write(f"    Stability Level: {assessment['stability_level']}\n")
+                            f.write(f"    Recommendation: {assessment['recommendation']}\n")
+                            f.write(f"    Performance Rating: {assessment['performance_rating']}\n")
+                            f.write(f"    MAE: {assessment['mae']:.4f}°\n")
+                            f.write(f"    RMSE: {assessment['rmse']:.4f}°\n")
+                            f.write(f"    Std Dev: {assessment['std']:.4f}°\n")
+                            f.write(f"    SNR: {assessment['snr']:.2f} dB\n\n")
+                
+                elif madgwick_analysis.get('analysis_type') == 'multi_value':
+                    B_range = madgwick_analysis['B_madgwick_range']
+                    f.write(f"Filter Beta Range: {B_range[0]:.4f} - {B_range[1]:.4f}\n")
+                    f.write(f"Number of Different Values: {len(madgwick_analysis['B_madgwick_values'])}\n")
+                    f.write("Analysis Type: Multi-value (parameter tuning during flight)\n\n")
+                    
+                    f.write("Correlation Analysis:\n")
+                    for axis in ['roll', 'pitch', 'yaw']:
+                        if axis in madgwick_analysis['correlations']:
+                            corr = madgwick_analysis['correlations'][axis]
+                            f.write(f"  {axis.upper()}:\n")
+                            f.write(f"    MAE Correlation: {corr['mae_correlation']:.4f}\n")
+                            f.write(f"    RMSE Correlation: {corr['rmse_correlation']:.4f}\n")
+                            f.write(f"    Std Correlation: {corr['std_correlation']:.4f}\n")
+                            f.write(f"    Interpretation: {corr['interpretation']}\n\n")
+                
+                f.write("\n")
+            
             # Additional Statistics Section
             f.write("=" * 70 + "\n")
             f.write("Additional Statistics\n")
@@ -1253,9 +1963,9 @@ def save_comprehensive_report(csv_path, metrics, df, integrity_report, correlati
             for axis in ['roll', 'pitch', 'yaw']:
                 err_col = f'err_{axis}'
                 f.write(f"  {axis.capitalize():5s}: ")
-                f.write(f"mean={df[err_col].mean():.6f}°, ")
-                f.write(f"std={df[err_col].std():.6f}°, ")
-                f.write(f"max_abs={df[err_col].abs().max():.6f}°\n")
+                f.write(f"mean={df[err_col].mean():.8f}°, ")
+                f.write(f"std={df[err_col].std():.8f}°, ")
+                f.write(f"max_abs={df[err_col].abs().max():.8f}°\n")
             
             f.write("\nData Quality Assessment:\n")
             f.write(f"  Overall Quality Score: {integrity_report['data_quality_score']:.1f}/100\n")
@@ -1297,7 +2007,9 @@ def save_comprehensive_report(csv_path, metrics, df, integrity_report, correlati
             f.write("=" * 70 + "\n\n")
             
             plot_descriptions = {
-                'main': 'Main analysis plot showing attitude comparison, errors, accelerometer and gyroscope data',
+                'main': 'Main analysis: overlaid ctrl/mon attitude, err_*, accel and gyro',
+                'per_imu': 'Separate control vs monitor raw streams (acc, gyro, mag)',
+                'sensor_comparison': 'Attitude error, raw diffs (diff_*), and dual attitude overlay',
                 'error_analysis': 'Detailed error analysis including distributions, cumulative errors, statistics comparison, and settling times',
                 'integrity': 'Data integrity visualization with quality gauge, missing values, timestamp gaps, and sensor anomalies',
                 'correlation': 'Correlation heatmap showing relationships between all sensor channels',
@@ -1360,6 +2072,14 @@ def main():
     print("\n4. Performing cross-correlation analysis...")
     correlation_metrics = calculate_cross_correlation_metrics(df)
     
+    # 4.5. Madgwick Beta Parameter Analysis
+    print("\n4.5. Analyzing Madgwick filter beta parameter correlation...")
+    madgwick_analysis = analyze_madgwick_beta_correlation(df, stability_metrics)
+    
+    # 4.6. Offline Madgwick Beta Sweep (replay raw data at multiple β values)
+    print("\n4.6. Running offline Madgwick beta parameter sweep...")
+    beta_sweep_results = sweep_madgwick_beta(df)
+    
     # 5. Print Advanced Metrics
     print("\n5. Advanced stability analysis results:")
     advanced_metrics = print_advanced_stability_metrics(stability_metrics, correlation_metrics)
@@ -1373,9 +2093,16 @@ def main():
         print("\n6a. Saving enhanced plots to report directory...")
         saved_plots = save_enhanced_plots(fig, df, plots_dir, stability_metrics, integrity_report)
         
+        # Save beta sweep plot
+        if beta_sweep_results is not None:
+            print("\n6a-β. Saving beta sweep analysis plot...")
+            beta_fig = plot_beta_sweep_results(beta_sweep_results, plots_dir)
+            if beta_fig is not None and saved_plots is not None:
+                saved_plots['beta_sweep'] = os.path.join(plots_dir, 'beta_sweep_analysis.png')
+        
         # Save comprehensive report
         print("\n6b. Generating comprehensive report...")
-        save_comprehensive_report(csv_path, stability_metrics, df, integrity_report, correlation_metrics, report_dir, saved_plots)
+        save_comprehensive_report(csv_path, stability_metrics, df, integrity_report, correlation_metrics, madgwick_analysis, report_dir, saved_plots)
         
         # Save copy of original data for reference
         data_copy_path = os.path.join(data_dir, "original_data.csv")
