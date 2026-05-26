@@ -12,11 +12,26 @@ and non working magnetometer chips.
 
     #define USE_MPU9250_MONITOR_I2C   →  MPU9250  mpu9250_monitor(Wire1, 0x69)
     #define USE_ICM20948_MONITOR_I2C  →  ICM20948 icm20948_monitor(Wire1)
- 
-  All getter methods return the same physical units as the MPU9250
-  library (m/s² for accel, rad/s for gyro, µT for magnetometer) so
-  that getIMUdataMonitor() in imuMonitor.ino requires no changes.
- 
+
+  API parity with src/MPU9250/MPU9250.h (readSensor + getters + setMagCal +
+  getMotion6/9) so imuMonitor.ino can use MON_OBJ without #ifdef sensor logic.
+
+  ── MPU9250 vs ICM-20948 (same API, different silicon) ─────────────────────
+  • Transport:     MPU9250 = I²C or SPI; ICM20948 driver = I²C only here.
+  • Registers:     MPU9250 flat map; ICM-20948 banked (0–3) via REG_BANK_SEL.
+  • Mag companion: AK8963 (ASA per-axis trim) vs AK09916 (fixed 0.15 µT/LSB).
+  • Mag read path: MPU9250 I²C master → AK8963; ICM internal master → AK09916
+                   mirrored at EXT_SLV_SENS_DATA_00 with ST1 DRDY gating.
+  • Accel/gyro frame: MPU9250 readSensor() applies tX/tY/tZ remap; this driver
+                   applies the same remap in readSensor() for monitor parity.
+  • getMotion6/9:  Chip-native int16 counts (no axis remap, no gyro bias) —
+                   matches MPU9250 jihlein helpers for getIMUdata() scale factors.
+  • DLPF enums:    Names overlap for quad.h; numeric values differ — do not
+                   cast MPU9250 bandwidth enums to ICM20948.
+  • setSrd:        MPU9250 also retimes AK8963; ICM only divides accel/gyro ODR.
+  • Temperature:   Same formula as MPU9250 library after readout.
+  • Not on ICM:    SPI, FIFO subclass, accel cal setters, wake-on-motion.
+
   I²C only — the ICM-20948 SPI path is not implemented here because
   the monitor IMU is wired to Wire1 (SDA1/pin 16, SCL1/pin 17).
  
@@ -100,6 +115,15 @@ class ICM20948 {
   // bus     : reference to a TwoWire object (Wire, Wire1, …)
   // address : I²C address — default 0x68 (AD0 low)
   explicit ICM20948(TwoWire &bus, uint8_t address = ICM20948_I2C_ADDR_LOW);
+
+  // Update 7-bit address before begin() (used after Wire1 auto-detect in monitorIMUinit).
+  void setAddress(uint8_t address);
+  uint8_t getAddress() const { return _address; }
+
+  // Probe Wire/Wire1 for ICM-20948 at AD0=0 (0x68) or AD0=1 (0x69).
+  // Uses Teensy TwoWire::beginTransmission/endTransmission (ACK) then WHO_AM_I.
+  // Returns 0 if not found.
+  static uint8_t detectOnBus(TwoWire &bus);
  
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   // begin() initialises the device, wakes it, configures default ranges
@@ -117,6 +141,9 @@ class ICM20948 {
   // Maps to the ICM-20948 GYRO_SMPLRT_DIV / ACCEL_SMPLRT_DIV registers.
   // Pass 0 for maximum rate (matches mpu9250_monitor.setSrd(0) in imuMonitor.ino).
   int setSrd(uint8_t srd);
+
+  // LSB divisors (match MPU6050 GYRO_SCALE_FACTOR / ACCEL_SCALE_FACTOR at same FS).
+  static constexpr float INVENSENSE_LSB_SCALE = 32768.0f;
  
   // ── Magnetometer calibration setters (same signature as MPU9250) ──────────
   // bias   : hard-iron offset in µT
@@ -174,6 +201,11 @@ class ICM20948 {
   // Spins until _maxCounts samples are collected then computes bias & scale.
   // Returns 1 on success (same API as MPU9250::calibrateMag()).
   int calibrateMag();
+
+  // Raw int16 outputs for DRehmFlight getIMUdata() (same usage as MPU9250::getMotion6/9).
+  void getMotion6(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16_t *gy, int16_t *gz);
+  void getMotion9(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16_t *gy, int16_t *gz,
+                  int16_t *mx, int16_t *my, int16_t *mz);
  
  private:
  
@@ -198,6 +230,7 @@ class ICM20948 {
   int16_t _gxcounts, _gycounts, _gzcounts;
   int16_t _hxcounts, _hycounts, _hzcounts;
   int16_t _tcounts;
+  bool    _magDataReady;
  
   // ── Scale factors ─────────────────────────────────────────────────────────
   float _accelScale;          // (m/s²) / count
@@ -247,7 +280,7 @@ class ICM20948 {
   // ════════════════════════════════════════════════════════════════════════════
  
   // ── Bank select (common to all banks) ─────────────────────────────────────
-  static const uint8_t REG_BANK_SEL      = 0x7F;
+  static const uint8_t REG_BANK_SEL      = 0x7F;  // also used by detectOnBus()
  
   // ── Bank 0 ────────────────────────────────────────────────────────────────
   static const uint8_t WHO_AM_I          = 0x00;
@@ -332,6 +365,16 @@ class ICM20948 {
   // [DS AK09916] §8.3.4 — 0.15 µT/LSB at 16-bit
   static const float AK09916_MAG_SCALE; // defined in .cpp as 0.15f
  
+  // ── Axis remap (must match MPU9250.cpp tX/tY/tZ — AK8963 alignment) ────────
+  static const int16_t tX[3];
+  static const int16_t tY[3];
+  static const int16_t tZ[3];
+
+  static int16_t transformCount(const int16_t t[3], int16_t c0, int16_t c1, int16_t c2);
+
+  // Burst-read chip registers into _*counts (no scaling / bias / axis remap).
+  int readRawCounts();
+
   // ── Private helpers ────────────────────────────────────────────────────────
  
   // Bank-aware register access
