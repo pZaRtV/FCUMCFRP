@@ -156,6 +156,16 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 #endif
 
 //========================================================================================================================//
+//                                            FORWARD DECLARATIONS                                                        //
+//========================================================================================================================//
+
+// invSqrt() returns float — Arduino IDE's auto-prototyper only handles void functions,
+// so this explicit declaration is required to avoid "not declared in this scope" errors
+// when Madgwick() and Madgwick6DOF() call it before line 2719 where it is defined.
+// to accomodate extern declarations later on onto the other additional nodes
+float invSqrt(float x);
+
+//========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
 //========================================================================================================================//
 
