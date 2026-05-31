@@ -128,8 +128,8 @@ ICM20948::ICM20948(TwoWire &bus, uint8_t address)
       _counter(0), _framedelta(0), _delta(0),
       _hxfilt(0), _hyfilt(0), _hzfilt(0),
       _hxmax(0), _hymax(0), _hzmax(0),
-      _hxmin(0), _hymin(0), _hzmin(0), _avgs(0),
-      _magDataReady(false) {}
+      _hxmin(0), _hymin(0), _hzmin(0),
+      _magDataReady(false), _avgs(0) {}
  
 // ════════════════════════════════════════════════════════════════════════════
 //  begin() — initialise device
