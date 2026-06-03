@@ -205,14 +205,24 @@ float GyroErrorX_mon = 0.0;
 float GyroErrorY_mon = 0.0;
 float GyroErrorZ_mon = 0.0;
 
-// Magnetometer calibration — for 9-DOF monitor (MPU9250/ICM20948), uncomment calibrateMagnetometer() in setup
-// These are shared between main and monitor IMUs if both use MPU9250, otherwise only used by MPU9250
-float MagErrorX = 0.0;
-float MagErrorY = 0.0; 
-float MagErrorZ = 0.0;
-float MagScaleX = 1.0;
-float MagScaleY = 1.0;
-float MagScaleZ = 1.0;
+// Magnetometer calibration — MAIN IMU (MPU9250 SPI or ICM20948 I2C on Wire)
+// Calibrate using calibrateMagnetometer_main() in setup → paste values here.
+// Only relevant if main IMU has a magnetometer (MPU9250/ICM20948, NOT MPU6050).
+float MagErrorX_main = 0.0;
+float MagErrorY_main = 0.0;
+float MagErrorZ_main = 0.0;
+float MagScaleX_main = 1.0;
+float MagScaleY_main = 1.0;
+float MagScaleZ_main = 1.0;
+
+// Magnetometer calibration — MONITOR IMU (MPU9250/ICM20948 on Wire1)
+// Calibrate using calibrateMagnetometer_monitor() in setup → paste values here.
+float MagErrorX_mon = 0.0;
+float MagErrorY_mon = 0.0;
+float MagErrorZ_mon = 0.0;
+float MagScaleX_mon = 1.0;
+float MagScaleY_mon = 1.0;
+float MagScaleZ_mon = 1.0;
 
 // Legacy calibration parameters (deprecated - kept for backward compatibility)
 // NOTE: These are no longer used. Use the _main and _mon versions above instead.
@@ -392,6 +402,12 @@ PWMServo motor6_esc;
 //Flight status
 bool armedFly = false;
 
+// IMU init status flags (set by IMUinit() / monitorIMUinit())
+// mainImuOk  — MPU6050 flight-critical: fatal halt enforced in setup() before loop().
+// monitorImuOk — ICM20948/MPU9250 non-critical: soft-fail, FC flies without it.
+bool mainImuOk    = false;
+bool monitorImuOk = false;
+
 //========================================================================================================================//
 //                                           FUNCTION DECLARATIONS                                                        //                           
 //========================================================================================================================//
@@ -403,10 +419,11 @@ void togglePPMDebug();
 
 // Monitor IMU functions
 #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
-void monitorIMUinit();
+void monitorIMUinit();         // IMU hardware only (Wire1 + ICM20948/MPU9250)
+void networkInit();            // Ethernet + UDP — called after calibration, before flight loop
 void runMonitorImuLoopStep(float dt);
 void calculate_IMU_error_monitor();
-void calibrateMagnetometerMonitor();
+void calibrateMagnetometer_monitor();
 #endif
 
 //========================================================================================================================//
@@ -643,16 +660,63 @@ void setup() {
   channel_5_pwm = channel_5_fs;
   channel_6_pwm = channel_6_fs;
 
-  //Initialize IMU communication
-  IMUinit();
+  // ── Monitor IMU init (Wire1 — independent of main IMU) ─────────────────────
+  // Soft-fail: if monitor IMU is absent/broken, monitorImuOk = false and
+  // the FC continues without UDP telemetry. Does NOT halt flight operation.
+  #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
+    monitorIMUinit(); // sets monitorImuOk
+  #endif
+
+  // ── Main control IMU init (Wire) ─────────────────────────────────────────
+  // Soft-fail: IMUinit() sets mainImuOk = false if absent/broken. The fatal
+  // halt is enforced BELOW the calibration zone, so you can still run monitor 
+  // calibrations on the bench even if the main flight IMU is disconnected.
+  IMUinit(); // sets mainImuOk
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  CALIBRATION ZONE  (Uncomment ONE function at a time to calibrate)
+  // ══════════════════════════════════════════════════════════════════════════
+  //  Note: These functions will halt the flight controller after printing 
+  //  the calibration values. Copy the values to the variables at the top of 
+  //  this file, re-comment the function here, and re-upload the code.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // -- MAIN IMU (Flight Control) --
+  // calculate_IMU_error_main();       // 1. Accel/Gyro: keep perfectly level & still
+  // calibrateMagnetometer_main();     // 2. Mag: rotate continuously in a 3D figure-8
+
+  // -- MONITOR IMU (Data Logging) --
+  #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
+  // calculate_IMU_error_monitor();    // 1. Accel/Gyro: keep perfectly level & still
+  // calibrateMagnetometer_monitor();  // 2. Mag: rotate continuously in a 3D figure-8
+  #endif
+
+  // ══════════════════════════════════════════════════════════════════════════
+
+
+  // ── Flight-safety halt (deferred) ────────────────────────────────────────
+  // Main IMU is flight-critical. If it failed, halt here — after monitor IMU
+  // has already initialised (and optionally calibrated) independently above.
+  if (!mainImuOk) {
+    Serial.println("[FATAL] Main IMU failed — cannot enter flight loop. Check wiring.");
+    while (1) {}
+  }
+
+  // ── Network init (Ethernet + UDP) ────────────────────────────────────────
+  // Intentionally placed AFTER all calibration routines and the safety halt.
+  // This keeps the SPI bus and serial output silent during IMU calibration,
+  // and ensures DHCP/static-IP setup only runs when entering normal flight.
+  // Disable entirely by commenting out USE_UDP_TELEMETRY in quad.h.
+  #if defined USE_UDP_TELEMETRY
+    #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
+      if (monitorImuOk) {
+        networkInit();
+      }
+    #endif
+  #endif
 
   delay(5);
-
-  // Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
-  // calculate_IMU_error_main(); //Calibration parameters printed to serial monitor for MAIN IMU. Paste these in the user specified variables section, then comment this out forever.
-  #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
-  // calculate_IMU_error_monitor(); // After IMUinit()/monitorIMUinit(). Paste values, then comment out.
-  #endif
 
   //Arm servo channels
   servo1.write(0); //Command servo angle from 0-180 degrees (1000 to 2000 PWM)
@@ -709,9 +773,6 @@ Step 6 — Reflash
 
   //Indicate entering main loop with 3 quick blinks
   setupBlink(3,160,70); //numBlinks, upTime (ms), downTime (ms)
-
-  //If using MPU9250 IMU, uncomment for one-time magnetometer calibration (may need to repeat for new locations)
-  //calibrateMagnetometer(); //Generates magentometer error and scale factors to be pasted in user-specified variables section
 
   // ============================================================
 // PPM HARDWARE DIAGNOSTIC — paste into setup() temporarily
@@ -916,7 +977,9 @@ void loop() {
   // Data is sent via UDP over W5500 Ethernet for real-time telemetry.
   // Both raw sensor data and attitude data are ALWAYS computed and sent via UDP.
   #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
-    runMonitorImuLoopStep(dt);
+    if (monitorImuOk) { // skip silently if monitor IMU failed to initialise
+      runMonitorImuLoopStep(dt);
+    }
   #endif
 
   //Send IMU attitude via CRSF telemetry (for monitoring on transmitter)
@@ -1064,7 +1127,8 @@ void IMUinit() {
     if (mpu6050.testConnection() == false) {
       Serial.println("MPU6050 initialization unsuccessful");
       Serial.println("Check MPU6050 wiring or try cycling power");
-      while(1) {}
+      mainImuOk = false;
+      return;
     }
 
     //From the reset state all registers should be 0x00, so we should be at
@@ -1081,7 +1145,8 @@ void IMUinit() {
       Serial.println("Check MPU9250 wiring or try cycling power");
       Serial.print("Status: ");
       Serial.println(status);
-      while(1) {}
+      mainImuOk = false;
+      return;
     }
 
     //From the reset state all registers should be 0x00, so we should be at
@@ -1089,9 +1154,9 @@ void IMUinit() {
     //do is set the desired fullscale ranges
     mpu9250.setGyroRange(GYRO_SCALE);
     mpu9250.setAccelRange(ACCEL_SCALE);
-    mpu9250.setMagCalX(MagErrorX, MagScaleX);
-    mpu9250.setMagCalY(MagErrorY, MagScaleY);
-    mpu9250.setMagCalZ(MagErrorZ, MagScaleZ);
+    mpu9250.setMagCalX(MagErrorX_main, MagScaleX_main);
+    mpu9250.setMagCalY(MagErrorY_main, MagScaleY_main);
+    mpu9250.setMagCalZ(MagErrorZ_main, MagScaleZ_main);
     mpu9250.setSrd(0); //sets gyro and accel read to 1khz, magnetometer read to 100hz
 
   #elif defined USE_ICM20948_I2C
@@ -1102,20 +1167,18 @@ void IMUinit() {
       Serial.println("Check icm20948 wiring or try cycling power");
       Serial.print("Status: ");
       Serial.println(status);
-      while(1) {}
+      mainImuOk = false;
+      return;
     }
 // still tentative for ICM20948, so still handled the same as mpu9250
     icm20948.setGyroRange(GYRO_SCALE);
     icm20948.setAccelRange(ACCEL_SCALE);
-    icm20948.setMagCalX(MagErrorX, MagScaleX);
-    icm20948.setMagCalY(MagErrorY, MagScaleY);
-    icm20948.setMagCalZ(MagErrorZ, MagScaleZ);
+    icm20948.setMagCalX(MagErrorX_main, MagScaleX_main);
+    icm20948.setMagCalY(MagErrorY_main, MagScaleY_main);
+    icm20948.setMagCalZ(MagErrorZ_main, MagScaleZ_main);
     icm20948.setSrd(0); //sets gyro and accel read to 1khz, magnetometer read to 100hz
   #endif
-
-  #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
-    monitorIMUinit();
-  #endif
+  mainImuOk = true; // all branches succeeded
 }
 
 void getIMUdata() {
@@ -1181,9 +1244,9 @@ void getIMUdata() {
     MagY = MgY/6.0;
     MagZ = MgZ/6.0;
     //Correct the outputs with the calculated error values
-    MagX = (MagX - MagErrorX)*MagScaleX;
-    MagY = (MagY - MagErrorY)*MagScaleY;
-    MagZ = (MagZ - MagErrorZ)*MagScaleZ;
+    MagX = (MagX - MagErrorX_main)*MagScaleX_main;
+    MagY = (MagY - MagErrorY_main)*MagScaleY_main;
+    MagZ = (MagZ - MagErrorZ_main)*MagScaleZ_main;
     //LP filter magnetometer data
     MagX = (1.0 - B_mag)*MagX_prev + B_mag*MagX;
     MagY = (1.0 - B_mag)*MagY_prev + B_mag*MagY;
@@ -1198,9 +1261,9 @@ void getIMUdata() {
     MagY = MgY * 0.15f;
     MagZ = MgZ * 0.15f;
     //Correct the outputs with the calculated error values
-    MagX = (MagX - MagErrorX)*MagScaleX;
-    MagY = (MagY - MagErrorY)*MagScaleY;
-    MagZ = (MagZ - MagErrorZ)*MagScaleZ;
+    MagX = (MagX - MagErrorX_main)*MagScaleX_main;
+    MagY = (MagY - MagErrorY_main)*MagScaleY_main;
+    MagZ = (MagZ - MagErrorZ_main)*MagScaleZ_main;
     //LP filter magnetometer data
     MagX = (1.0 - B_mag)*MagX_prev + B_mag*MagX;
     MagY = (1.0 - B_mag)*MagY_prev + B_mag*MagY;
@@ -1297,7 +1360,7 @@ void calculate_IMU_error_main() {
   Serial.println("Paste these values in the MAIN IMU calibration parameters section and comment out calculate_IMU_error_main() in void setup.");
 }
 
-// calculate_IMU_error_monitor() / calibrateMagnetometerMonitor() — imuMonitor.ino (MON_OBJ)
+// calculate_IMU_error_monitor() / calibrateMagnetometer_monitor() — imuMonitor.ino (MON_OBJ)
 
 void calibrateAttitude() {
   //DESCRIPTION: Used to warm up the main loop to allow the madwick filter to converge before commands can be sent to the actuators
@@ -2249,19 +2312,25 @@ void throttleCut() {
   }
 }
 
-void calibrateMagnetometer() {
-  //DESCRIPTION: Calibrates magnetometer for MPU9250 (both SPI main IMU and I2C monitor IMU)
-  /*
-   * This function supports magnetometer calibration for:
-   * 1. Main IMU (MPU9250 via SPI) - when USE_MPU9250_SPI is defined
-   * 2. Monitor IMU (MPU9250 or ICM20948 on Wire1) — calibrateMagnetometerMonitor() in imuMonitor.ino
-   * 3. Main IMU (ICM20948 via I2C) - when USE_ICM20948_I2C is defined
-   * The calibration process generates bias and scale factors that should be copied
-   * to the magnetometer calibration parameters in the user variables section.
-   */
-  
-  #if defined USE_MPU9250_SPI 
-    // Main IMU (SPI) magnetometer calibration
+void calibrateMagnetometer_main() {
+  //DESCRIPTION: Calibrates magnetometer for the MAIN IMU only.
+  //  MPU9250 SPI  → SPI bus (pins 11/12/13 + CS)  — defined by MAIN_IMU_BUS = SPI
+  //  ICM20948 I2C → Wire bus (pins 18/19)          — defined by MAIN_IMU_BUS = Wire
+  //  MPU6050 I2C  → Wire bus, but has NO magnetometer → prints error and halts
+  //
+  // For monitor IMU (ICM20948/MPU9250 on Wire1, pins 16/17) use
+  // calibrateMagnetometer_monitor() in the monitor block in setup() —
+  // it runs before IMUinit() so the MPU6050 does not need to be connected.
+
+  // Guard: execution only reaches here after the !mainImuOk safety halt in
+  // setup(), so mainImuOk is guaranteed true. Guard retained for symmetry
+  // with calibrateMagnetometer_monitor() and future call-site safety.
+  if (!mainImuOk) {
+    Serial.println("[calibrateMagnetometer_main] Main IMU not initialised — skipping.");
+    return;
+  }
+
+  #if defined USE_MPU9250_SPI
     float success;
     Serial.println("Beginning MAIN IMU (SPI) magnetometer calibration in");
     Serial.println("3...");
@@ -2273,42 +2342,24 @@ void calibrateMagnetometer() {
     Serial.println("Rotate the MAIN IMU about all axes until complete.");
     Serial.println(" ");
     success = mpu9250.calibrateMag();
-    if(success) {
+    if (success) {
       Serial.println("MAIN IMU Calibration Successful!");
-      Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
-      Serial.print("float MagErrorX = ");
-      Serial.print(mpu9250.getMagBiasX_uT());
-      Serial.println(";");
-      Serial.print("float MagErrorY = ");
-      Serial.print(mpu9250.getMagBiasY_uT());
-      Serial.println(";");
-      Serial.print("float MagErrorZ = ");
-      Serial.print(mpu9250.getMagBiasZ_uT());
-      Serial.println(";");
-      Serial.print("float MagScaleX = ");
-      Serial.print(mpu9250.getMagScaleFactorX());
-      Serial.println(";");
-      Serial.print("float MagScaleY = ");
-      Serial.print(mpu9250.getMagScaleFactorY());
-      Serial.println(";");
-      Serial.print("float MagScaleZ = ");
-      Serial.print(mpu9250.getMagScaleFactorZ());
-      Serial.println(";");
-      Serial.println(" ");
-      Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
+      Serial.println("Comment out calibrateMagnetometer_main() and copy:");
+      Serial.print("float MagErrorX_main = "); Serial.print(mpu9250.getMagBiasX_uT());    Serial.println(";");
+      Serial.print("float MagErrorY_main = "); Serial.print(mpu9250.getMagBiasY_uT());    Serial.println(";");
+      Serial.print("float MagErrorZ_main = "); Serial.print(mpu9250.getMagBiasZ_uT());    Serial.println(";");
+      Serial.print("float MagScaleX_main = "); Serial.print(mpu9250.getMagScaleFactorX()); Serial.println(";");
+      Serial.print("float MagScaleY_main = "); Serial.print(mpu9250.getMagScaleFactorY()); Serial.println(";");
+      Serial.print("float MagScaleZ_main = "); Serial.print(mpu9250.getMagScaleFactorZ()); Serial.println(";");
+      Serial.println("If you are having trouble at a new location, repeat as needed.");
+    } else {
+      Serial.println("MAIN IMU Calibration Unsuccessful. Reset and retry.");
     }
-    else {
-      Serial.println("MAIN IMU Calibration Unsuccessful. Please reset the board and try again.");
-    }
-  
-    while(1); //Halt code so it won't enter main loop until this function commented out
-    
-  #elif defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
-    calibrateMagnetometerMonitor();
+    while (1); // halt — comment out calibrateMagnetometer_main() then reflash
 
   #elif defined USE_ICM20948_I2C
     float success;
-    Serial.println("Beginning MAIN IMU (SPI) magnetometer calibration in");
+    Serial.println("Beginning MAIN IMU (I2C ICM20948) magnetometer calibration in");
     Serial.println("3...");
     delay(1000);
     Serial.println("2...");
@@ -2317,42 +2368,27 @@ void calibrateMagnetometer() {
     delay(1000);
     Serial.println("Rotate the MAIN IMU about all axes until complete.");
     Serial.println(" ");
-    success =  icm20948.calibrateMag();
-    if(success) {
+    success = icm20948.calibrateMag();
+    if (success) {
       Serial.println("MAIN IMU Calibration Successful!");
-      Serial.println("Please comment out the calibrateMagnetometer() function and copy these values into the code:");
-      Serial.print("float MagErrorX = ");
-      Serial.print(icm20948.getMagBiasX_uT());
-      Serial.println(";");
-      Serial.print("float MagErrorY = ");
-      Serial.print(icm20948.getMagBiasY_uT());
-      Serial.println(";");
-      Serial.print("float MagErrorZ = ");
-      Serial.print(icm20948.getMagBiasZ_uT());
-      Serial.println(";");
-      Serial.print("float MagScaleX = ");
-      Serial.print(icm20948.getMagScaleFactorX());
-      Serial.println(";");
-      Serial.print("float MagScaleY = ");
-      Serial.print(icm20948.getMagScaleFactorY());
-      Serial.println(";");
-      Serial.print("float MagScaleZ = ");
-      Serial.print(icm20948.getMagScaleFactorZ());
-      Serial.println(";");
-      Serial.println(" ");
-      Serial.println("If you are having trouble with your attitude estimate at a new flying location, repeat this process as needed.");
+      Serial.println("Comment out calibrateMagnetometer_main() and copy:");
+      Serial.print("float MagErrorX_main = "); Serial.print(icm20948.getMagBiasX_uT());    Serial.println(";");
+      Serial.print("float MagErrorY_main = "); Serial.print(icm20948.getMagBiasY_uT());    Serial.println(";");
+      Serial.print("float MagErrorZ_main = "); Serial.print(icm20948.getMagBiasZ_uT());    Serial.println(";");
+      Serial.print("float MagScaleX_main = "); Serial.print(icm20948.getMagScaleFactorX()); Serial.println(";");
+      Serial.print("float MagScaleY_main = "); Serial.print(icm20948.getMagScaleFactorY()); Serial.println(";");
+      Serial.print("float MagScaleZ_main = "); Serial.print(icm20948.getMagScaleFactorZ()); Serial.println(";");
+      Serial.println("If you are having trouble at a new location, repeat as needed.");
+    } else {
+      Serial.println("MAIN IMU Calibration Unsuccessful. Reset and retry.");
     }
-    else {
-      Serial.println("MAIN IMU Calibration Unsuccessful. Please reset the board and try again.");
-    }
-  
-    while(1); //Halt code so it won't enter main loop until this function commented out
+    while (1); // halt — comment out calibrateMagnetometer_main() then reflash
 
   #else
-    Serial.println("Error: No ICM20948/MPU9250 IMU available for magnetometer calibration.");
-    Serial.println("Enable either USE_ICM20948_I2C / USE_MPU9250_SPI (main IMU) or USE_ICM20948_MONITOR_I2C / USE_MPU9250_MONITOR_I2C (monitor IMU) in quad.h");
-    Serial.println("Note: MPU6050 does not have a magnetometer, so magnetometer calibration is not applicable.");
-    while(1); //Halt code so it won't enter main loop until this function commented out
+    // MPU6050 has no magnetometer; monitor mag cal uses calibrateMagnetometer_monitor() instead.
+    Serial.println("[calibrateMagnetometer_main] No magnetometer on main IMU (MPU6050).");
+    Serial.println("For monitor IMU mag cal: uncomment calibrateMagnetometer_monitor() in the monitor block in setup().");
+    while (1);
   #endif
 }
 
