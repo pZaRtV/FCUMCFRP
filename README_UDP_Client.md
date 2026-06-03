@@ -2,9 +2,9 @@
 
 Python client for receiving, visualizing, and logging IMU telemetry data from the FCU Madgwick Control Filter Research Platform.
 
-## Enhanced Features (Version 1.1)
+## Enhanced Features (Version 1.2)
 
-This enhanced version includes comprehensive **event detection and disturbance monitoring**:
+This enhanced version includes comprehensive **event detection and disturbance monitoring** plus **IBUS receiver support**:
 
 - **Event Detection**: Real-time detection of command inputs and attitude changes
 - **Disturbance Monitoring**: Identifies uncommanded attitude changes (wind gusts, turbulence)
@@ -75,6 +75,12 @@ The script uses the following UDP settings (must match `quad.h`):
    - Disturbance events are highlighted with detailed descriptions
    - Event flags are included in CSV data for post-analysis
 
+4. PACKET STRUCTURE:
+   - Enhanced: 117 bytes (timestamp + event_flags + B_madgwick + 27 floats)
+   - Backward compatible with existing analysis tools
+   - Event flags use bit-field for efficiency
+   - B_madgwick parameter for filter analysis
+
 5. **View live plots** - Matplotlib window shows:
    - Top-left: Attitude comparison (Roll, Pitch, Yaw)
    - Top-right: Attitude errors
@@ -100,6 +106,7 @@ The CSV file contains the following columns (in order):
 **Timestamp:**
 - `timestamp_us` - Arduino timestamp in microseconds
 - `event_flags` - Bit-field event flags (0-255)
+- `B_madgwick` - Madgwick filter beta parameter from main controller
 
 **Control IMU Raw Sensors (MPU6050):**
 - `ctrl_acc_x`, `ctrl_acc_y`, `ctrl_acc_z` - Accelerometer (g)
@@ -200,5 +207,6 @@ The `event_flags` byte uses the following bit mapping:
 
 ## Version History
 
-- **v1.0**: Basic UDP reception and CSV logging
-- **v1.1**: Enhanced with event detection and disturbance monitoring
+- **v1.2** (2026-04-14): IBUS receiver support, bug fixes, enhanced stability
+- **v1.1** (2025-01-22): Event detection and disturbance monitoring
+- **v1.0** (2025-01-18): Initial release with basic UDP telemetry

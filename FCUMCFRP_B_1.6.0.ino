@@ -689,7 +689,7 @@ void setup() {
   // -- MONITOR IMU (Data Logging) --
   #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
   // calculate_IMU_error_monitor();    // 1. Accel/Gyro: keep perfectly level & still
-  // calibrateMagnetometer_monitor();  // 2. Mag: rotate continuously in a 3D figure-8
+  calibrateMagnetometer_monitor();  // 2. Mag: rotate continuously in a 3D figure-8
   #endif
 
   // ══════════════════════════════════════════════════════════════════════════

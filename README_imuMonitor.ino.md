@@ -5,6 +5,7 @@ Advanced IMU monitoring and telemetry system for flight control research and val
 ## Overview
 
 `imuMonitor.ino` is a sophisticated monitoring system that:
+
 - **Independent IMU Fusion**: Separate Madgwick filter for validation
 - **Event Detection**: Command and disturbance monitoring with intelligent classification
 - **UDP Telemetry**: Real-time data transmission at 100Hz
@@ -16,7 +17,7 @@ Advanced IMU monitoring and telemetry system for flight control research and val
 
 ### 1. Dual IMU Architecture
 
-```
+```text
 ┌─────────────────┐    ┌─────────────────┐
 │   Control IMU   │    │   Monitor IMU   │
 │   (MPU6050)     │    │   (MPU9250)     │
@@ -39,6 +40,7 @@ Advanced IMU monitoring and telemetry system for flight control research and val
 ### 2. Event Detection System
 
 #### Event Flags Structure
+
 ```cpp
 struct EventFlags {
   uint8_t command_change : 1;      // Command input changed (>10%)
@@ -53,6 +55,7 @@ struct EventFlags {
 ```
 
 #### Detection Thresholds
+
 ```cpp
 const float COMMAND_THRESHOLD = 0.1;      // 10% command change
 const float ATTITUDE_THRESHOLD = 2.0;     // 2° attitude change
@@ -63,6 +66,7 @@ const unsigned long EVENT_DEBOUNCE_MS = 100; // 100ms debounce
 ### 3. Disturbance Detection Logic
 
 #### Smart Detection Algorithm
+
 ```cpp
 void detectEvents() {
   // Only detect disturbances when:
@@ -84,18 +88,21 @@ void detectEvents() {
 ```
 
 #### Disturbance Types Detected
+
 - **Wind Gusts**: Sudden lateral/vertical disturbances
 - **Turbulence**: Continuous atmospheric disturbances
 - **External Forces**: Physical impacts or collisions
 - **Control System Issues**: Unintended attitude excursions
 
-### 4. UDP Telemetry System
+### 3. UDP Telemetry System
 
 #### Packet Structure
+
 ```cpp
 struct IMUDataPacket {
   uint32_t timestamp_us;        // Arduino timestamp (μs)
   EventFlags flags;             // Event detection flags (1 byte)
+  float B_madgwick;            // Madgwick filter beta parameter from main controller
   
   // Control IMU Raw Sensors (9 floats)
   float ctrl_acc_x, ctrl_acc_y, ctrl_acc_z;    // Accelerometer (g)
@@ -119,14 +126,17 @@ struct IMUDataPacket {
 ```
 
 #### Packet Specifications
-- **Total Size**: 113 bytes (4 + 1 + 27×4)
+
+- **Total Size**: 117 bytes (4 + 1 + 4 + 27×4)
 - **Transmission Rate**: 100Hz (10ms intervals)
 - **Protocol**: UDP over Ethernet
 - **Compression**: Bit-field event flags (1 byte)
+- **New Feature**: B_madgwick parameter for filter analysis
 
 ### 5. Network Configuration
 
 #### Ethernet Setup
+
 ```cpp
 // W5500 Ethernet Configuration
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};  // MAC address
@@ -136,6 +146,7 @@ byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};  // MAC address
 ```
 
 #### IP Configuration
+
 ```cpp
 // Remote IP address (ground station)
 #define UDP_REMOTE_IP_0 192
@@ -149,6 +160,7 @@ byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};  // MAC address
 ### 1. Initialization Functions
 
 #### Monitor IMU Initialization
+
 ```cpp
 void monitorIMUinit() {
   // Initialize Wire1 I2C bus at 400kHz
@@ -166,6 +178,7 @@ void monitorIMUinit() {
 ```
 
 #### Network Initialization
+
 ```cpp
 void setupEthernet() {
   // Initialize W5500 Ethernet
@@ -184,6 +197,7 @@ void setupEthernet() {
 ### 2. Data Acquisition Functions
 
 #### Monitor IMU Data Reading
+
 ```cpp
 void getMonitorIMUdata() {
   // Read raw sensor data from MPU9250
@@ -213,6 +227,7 @@ void getMonitorIMUdata() {
 ```
 
 #### Madgwick Filter for Monitor IMU
+
 ```cpp
 void MadgwickMonitor() {
   // Independent Madgwick filter for monitor IMU
@@ -230,6 +245,7 @@ void MadgwickMonitor() {
 ### 3. Event Detection Functions
 
 #### Event Detection Algorithm
+
 ```cpp
 void detectEvents() {
   // Clear all flags first
@@ -302,6 +318,7 @@ void detectEvents() {
 ### 4. Data Transmission Functions
 
 #### UDP Data Transmission
+
 ```cpp
 void sendIMUDataUDP() {
   // Rate limiting (100Hz)
@@ -328,6 +345,7 @@ void sendIMUDataUDP() {
 ```
 
 #### Data Comparison Functions
+
 ```cpp
 void compareAttitude() {
   // Compare control vs monitor IMU attitudes
@@ -351,6 +369,7 @@ void compareRawSensors() {
 ## Integration with Main Flight Control
 
 ### Call Integration
+
 ```cpp
 // In FCUMCFRP_B_1.4.5.ino main loop
 void loop() {
@@ -361,32 +380,89 @@ void loop() {
 ```
 
 ### Data Sharing
+
 - **Global Variables**: All flight data accessible to monitor
 - **No Interference**: Monitor doesn't affect control loop
 - **Real-time Access**: Immediate access to current flight state
 - **Event Synchronization**: Events detected in real-time
 
+### 6. B_madgwick Parameter Integration
+
+#### Filter Parameter Transmission
+
+```cpp
+// B_madgwick parameter from main flight controller
+// Transmitted in every UDP packet for correlation analysis
+dataPacket.B_madgwick = B_madgwick;  // From FCUMCFRP_B_1.4.5.ino
+```
+
+#### Research Applications
+
+- **Filter Tuning Analysis**: Correlate B_madgwick with stability metrics
+- **Parameter Optimization**: Identify optimal beta values for flight conditions
+- **Performance Validation**: Quantify filter effectiveness
+- **Sensitivity Analysis**: Measure stability sensitivity to parameter changes
+
+#### Value Ranges and Interpretation
+
+- **< 0.02**: Very Aggressive (minimal filtering, fast response)
+- **0.02-0.04**: Aggressive (good for acrobatic flight)
+- **0.04-0.08**: Balanced (default, good compromise)
+- **0.08-0.15**: Conservative (strong filtering, stable flight)
+- **> 0.15**: Very Conservative (heavy filtering, slow response)
+
+#### Integration with Analysis Tools
+
+- **UDPClient.py**: Logs B_madgwick with timestamped data
+- **FlightlogAnalysis.py**: Correlates parameter with stability metrics
+- **Comprehensive Reports**: Includes filter parameter analysis
+- **Research Validation**: Data-driven filter tuning recommendations
+
+## Integration with Main Flight Control
+
+### Call Integration Point
+
+```cpp
+// In FCUMCFRP_B_1.4.5.ino main loop
+void loop() {
+  // ... main flight control code ...
+  
+  sendIMUDataUDP();  // Includes B_madgwick parameter
+}
+```
+
+### Data Sharing
+
+- **Global Variables**: B_madgwick accessible from main controller
+- **Real-time Access**: Current filter parameter value transmitted
+- **No Interference**: Monitor system doesn't affect control loop
+- **Research Synchronization**: Parameter and performance data synchronized
+
 ## Research Applications
 
 ### 1. Flight Control Validation
+
 - **Algorithm Testing**: Validate control algorithms
 - **Performance Analysis**: Measure control system performance
 - **Tuning Optimization**: Optimize PID parameters
 - **Robustness Testing**: Test under various conditions
 
 ### 2. Disturbance Analysis
+
 - **Wind Gust Characterization**: Study disturbance patterns
 - **Turbulence Response**: Analyze control behavior
 - **Environmental Assessment**: Evaluate flight conditions
 - **Control Authority**: Measure disturbance rejection capability
 
 ### 3. Sensor Fusion Validation
+
 - **IMU Consistency**: Compare different IMU performance
 - **Filter Performance**: Validate Madgwick filter accuracy
 - **Calibration Verification**: Check sensor calibration
 - **Noise Analysis**: Analyze sensor noise characteristics
 
 ### 4. Event Pattern Analysis
+
 - **Command Analysis**: Study pilot input patterns
 - **Disturbance Events**: Analyze external disturbances
 - **Response Time**: Measure control system latency
@@ -395,6 +471,7 @@ void loop() {
 ## Data Analysis Integration
 
 ### Ground Station Integration
+
 ```python
 # UDPClient.py receives and processes data
 - Real-time event logging
@@ -404,6 +481,7 @@ void loop() {
 ```
 
 ### Post-Flight Analysis
+
 ```python
 # FlightlogAnalysis.py analyzes recorded data
 - Advanced stability metrics
@@ -415,18 +493,21 @@ void loop() {
 ## Performance Characteristics
 
 ### Timing Performance
+
 - **Update Rate**: 100Hz UDP transmission
 - **Latency**: <10ms from event to transmission
 - **CPU Usage**: ~5% of available processing
 - **Memory Usage**: ~2KB for data structures
 
 ### Network Performance
+
 - **Bandwidth**: ~11.3KB/s (113 bytes × 100Hz)
 - **Packet Loss**: <1% typical on good networks
 - **Latency**: <5ms on local networks
 - **Reliability**: High with UDP checksums
 
 ### Detection Performance
+
 - **Command Detection**: <50ms response time
 - **Disturbance Detection**: <100ms response time
 - **False Positive Rate**: <1% with proper tuning
@@ -435,6 +516,7 @@ void loop() {
 ## Configuration and Tuning
 
 ### Event Detection Tuning
+
 ```cpp
 // Adjust these thresholds based on your application
 const float COMMAND_THRESHOLD = 0.1;      // 10% command sensitivity
@@ -444,6 +526,7 @@ const unsigned long EVENT_DEBOUNCE_MS = 100; // 100ms debounce time
 ```
 
 ### Network Configuration
+
 ```cpp
 // Adjust for your network setup
 #define UDP_REMOTE_IP_0 192    // Ground station IP
@@ -454,6 +537,7 @@ const unsigned long EVENT_DEBOUNCE_MS = 100; // 100ms debounce time
 ```
 
 ### Sensor Calibration
+
 ```cpp
 // MPU9250 calibration parameters
 float AccErrorX_mon = 0.0;     // Accelerometer bias
@@ -514,21 +598,23 @@ float GyroErrorZ_mon = 0.0;
 
 ## Version Information
 
-- **File Version**: Beta 1.4.5
-- **Event Detection Version**: 1.1
-- **Last Updated**: 2025-01-22
+- **File Version**: Beta 1.4.6
+- **Event Detection Version**: 1.2
+- **Last Updated**: 2026-04-14
 - **Author**: Patrick Andrasena T.
 - **Base Project**: dRehmFlight by Nicholas Rehm
 
 ## Dependencies
 
 ### Required Libraries
+
 - `Wire.h` - I2C communication
 - `SPI.h` - SPI communication
 - `Ethernet.h` - Network communication
 - `EthernetUdp.h` - UDP protocol
 
 ### Required Hardware
+
 - Teensy 4.0/4.1 development board
 - MPU9250 IMU sensor (monitor)
 - W5500 Ethernet shield
@@ -536,6 +622,7 @@ float GyroErrorZ_mon = 0.0;
 - Ground station computer
 
 ### Optional Hardware
+
 - Primary IMU (MPU6050) for comparison
 - Network switch for multiple devices
 - Antenna for wireless networks

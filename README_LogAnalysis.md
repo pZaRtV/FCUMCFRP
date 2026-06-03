@@ -2,9 +2,9 @@
 
 Post-processing analysis tool for saved IMU telemetry CSV log files.
 
-## Enhanced Features (Version 2.0)
+## Enhanced Features (Version 2.1)
 
-This enhanced version includes comprehensive **event detection analysis and disturbance monitoring**:
+This enhanced version includes comprehensive **event detection analysis and disturbance monitoring** plus **IBUS receiver support**:
 
 - **Advanced Stability Metrics**: 15 different stability validation metrics
 - **Event Pattern Analysis**: Command vs. disturbance event analysis
@@ -40,6 +40,14 @@ This enhanced version includes comprehensive **event detection analysis and dist
 - **Event Correlation**: Relationship between commands and disturbances
 - **Response Time Analysis**: Control system response to events
 - **Event Timeline Visualization**: Temporal event pattern analysis
+
+### B_madgwick Parameter Analysis
+- **Filter Parameter Correlation**: Analysis of B_madgwick vs stability metrics
+- **Single Value Analysis**: Stability assessment for constant B_madgwick flights
+- **Multi-Value Analysis**: Correlation analysis for parameter tuning flights
+- **Performance Rating**: Automated stability assessment based on B_madgwick
+- **Tuning Recommendations**: Data-driven filter parameter optimization
+- **Value Range Interpretation**: Very Aggressive to Very Conservative classification
 
 ### Data Integrity Validation
 - **UDP Packet Validation**: Structure and size verification
@@ -161,6 +169,7 @@ The `comprehensive_stability_report.txt` includes:
 - **Advanced Stability Metrics**: Detailed metric breakdowns
 - **Cross-Correlation Analysis**: Correlation results and interpretation
 - **Event Analysis**: Command and disturbance statistics
+- **B_madgwick Parameter Analysis**: Filter parameter correlation and recommendations
 - **Quality Assessment**: Automated classification and recommendations
 - **Visualization Descriptions**: Explanation of all generated plots
 
@@ -207,10 +216,17 @@ The `comprehensive_stability_report.txt` includes:
 - **Environmental Assessment**: Evaluate flight conditions
 
 ### Sensor Fusion Validation
-- **IMU Consistency**: Control vs. Monitor comparison
+- **IMU Consistency**: Control vs. Monitor IMU comparison
 - **Filter Performance**: Madgwick filter assessment
 - **Calibration Verification**: Sensor accuracy validation
 - **Cross-Correlation**: Sensor relationship analysis
+
+### Filter Parameter Optimization
+- **B_madgwick Correlation**: Quantify filter parameter effects on stability
+- **Parameter Tuning**: Data-driven optimization of Madgwick beta values
+- **Performance Trade-offs**: Analyze response vs. filtering balance
+- **Sensitivity Analysis**: Measure stability sensitivity to parameter changes
+- **Optimal Range Identification**: Find best B_madgwick values for conditions
 
 ## Example Output
 
@@ -302,5 +318,6 @@ Report location: report_20250122_064815
 
 ## Version History
 
-- **v1.0**: Basic stability metrics and 4-panel plotting
-- **v2.0**: Enhanced with event detection analysis, advanced metrics, and comprehensive reporting
+- **v2.1** (2026-04-14): IBUS receiver support, bug fixes, enhanced stability
+- **v2.0** (2026-01-22): Enhanced with event detection analysis, advanced metrics, and comprehensive reporting
+- **v1.0** (2025-01-18): Basic stability metrics and 4-panel plotting
