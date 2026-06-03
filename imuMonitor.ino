@@ -33,8 +33,8 @@
 // External calibration parameters from main flight controller
 extern float AccErrorX_mon, AccErrorY_mon, AccErrorZ_mon;
 extern float GyroErrorX_mon, GyroErrorY_mon, GyroErrorZ_mon;
-extern float MagErrorX, MagErrorY, MagErrorZ;
-extern float MagScaleX, MagScaleY, MagScaleZ;
+extern float MagErrorX_mon, MagErrorY_mon, MagErrorZ_mon;
+extern float MagScaleX_mon, MagScaleY_mon, MagScaleZ_mon;
 extern float B_accel, B_gyro, B_mag;
 extern float B_madgwick;
 extern float AccX_mon, AccY_mon, AccZ_mon;
@@ -49,6 +49,7 @@ extern float AccX, AccY, AccZ, GyroX, GyroY, GyroZ, MagX, MagY, MagZ;
 extern float roll_IMU, pitch_IMU, yaw_IMU;
 extern float thro_des, roll_des, pitch_des, yaw_des;
 extern bool armedFly;
+extern bool monitorImuOk; // set by monitorIMUinit(); guards monitor usage in loop()
 extern float invSqrt(float x);
 
 #if defined USE_MPU9250_MONITOR_I2C
@@ -180,7 +181,8 @@ void monitorIMUinit() {
   if (monitorAddr == 0) {
     Serial.println("Monitor IMU not found on Wire1 (tried 0x69 and 0x68)");
     Serial.println("Check AD0 wiring, pull-ups, and SDA1/SCL1 (pins 16/17)");
-    while (1) {}
+    monitorImuOk = false;
+    return; // soft-fail: FC continues without monitor IMU
   }
   MON_OBJ.setAddress(monitorAddr);
   Serial.print("Monitor IMU detected on Wire1 at 0x");
@@ -193,10 +195,12 @@ void monitorIMUinit() {
     Serial.println("Check monitor IMU wiring (Wire1) or try cycling power");
     Serial.print("Status: ");
     Serial.println(status_mon);
-    while(1) {}
+    monitorImuOk = false;
+    return; // soft-fail: FC continues without monitor IMU
   }
   
-  (void)status_mon; // Suppress unused variable warning // stats on mpu9250 IMU monitor
+  (void)status_mon; // suppress unused-variable warning
+  monitorImuOk = true; // monitor IMU fully initialised
   
   // Same FS as main IMU: GYRO_MON_SCALE / ACCEL_MON_SCALE track quad.h GYRO_* / ACCEL_*
   // (main uses GYRO_SCALE_FACTOR / ACCEL_SCALE_FACTOR on MPU6050 raw counts).
@@ -205,12 +209,18 @@ void monitorIMUinit() {
   
   // Magnetometer bias/scale applied once in getIMUdataMonitor() (not in driver).
   MON_OBJ.setSrd(0); // max rate accel/gyro; mag ~100 Hz on AK09916
-  
+  // Network (Ethernet + UDP) is initialised separately in networkInit(),
+  // called from setup() after all calibration routines have completed.
+}
+
+// Initialize W5500 Ethernet + UDP pipeline.
+// Called from setup() AFTER calibration, so calibration runs on clean, quiet hardware.
+void networkInit() {
   // Initialize W5500 Ethernet via SPI
   pinMode(W5500_CS_PIN, OUTPUT);
   digitalWrite(W5500_CS_PIN, HIGH);
   W5500_SPI_BUS.begin();
-  
+
   // Start Ethernet connection (DHCP)
   Serial.print("Initializing Ethernet...");
   if (Ethernet.begin(mac) == 0) {
@@ -223,22 +233,18 @@ void monitorIMUinit() {
   }
   Serial.print("Ethernet initialized. IP: ");
   Serial.println(Ethernet.localIP());
-  
+
   // Start UDP
   Udp.begin(UDP_LOCAL_PORT);
   Serial.print("UDP started on port ");
   Serial.println(UDP_LOCAL_PORT);
   Serial.print("Sending to: ");
-  Serial.print(UDP_REMOTE_IP_0);
-  Serial.print(".");
-  Serial.print(UDP_REMOTE_IP_1);
-  Serial.print(".");
-  Serial.print(UDP_REMOTE_IP_2);
-  Serial.print(".");
-  Serial.print(UDP_REMOTE_IP_3);
-  Serial.print(":");
+  Serial.print(UDP_REMOTE_IP_0); Serial.print(".");
+  Serial.print(UDP_REMOTE_IP_1); Serial.print(".");
+  Serial.print(UDP_REMOTE_IP_2); Serial.print(".");
+  Serial.print(UDP_REMOTE_IP_3); Serial.print(":");
   Serial.println(UDP_REMOTE_PORT);
-  
+
   lastUdpSend = 0;
 }
 
@@ -246,7 +252,11 @@ void runMonitorImuLoopStep(float dt) {
   getIMUdataMonitor();
   MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, -AccX_mon, AccY_mon, AccZ_mon,
                   MagY_mon, -MagX_mon, MagZ_mon, dt);
+  // UDP send is conditional: disable USE_UDP_TELEMETRY in quad.h to skip network entirely.
+  // Sensor reads and Madgwick always run regardless, for attitude validity.
+#if defined USE_UDP_TELEMETRY
   sendIMUDataUDP();
+#endif
 }
 
 // Read monitor IMU (MPU9250 or ICM20948) — MON_OBJ shared API
@@ -293,9 +303,9 @@ void getIMUdataMonitor() {
   float MagY_raw = MON_OBJ.getMagY_uT();
   float MagZ_raw = MON_OBJ.getMagZ_uT();
 
-  MagX_raw = (MagX_raw - MagErrorX) * MagScaleX;
-  MagY_raw = (MagY_raw - MagErrorY)*MagScaleY;
-  MagZ_raw = (MagZ_raw - MagErrorZ)*MagScaleZ;
+  MagX_raw = (MagX_raw - MagErrorX_mon) * MagScaleX_mon;
+  MagY_raw = (MagY_raw - MagErrorY_mon) * MagScaleY_mon;
+  MagZ_raw = (MagZ_raw - MagErrorZ_mon) * MagScaleZ_mon;
   MagX_mon = (1.0 - B_mag)*MagX_mon_prev + B_mag*MagX_raw;
   MagY_mon = (1.0 - B_mag)*MagY_mon_prev + B_mag*MagY_raw;
   MagZ_mon = (1.0 - B_mag)*MagZ_mon_prev + B_mag*MagZ_raw;
@@ -361,7 +371,11 @@ void calculate_IMU_error_monitor() {
 }
 
 // Interactive mag cal (AK8963 or AK09916 via MON_OBJ.calibrateMag())
-void calibrateMagnetometerMonitor() {
+void calibrateMagnetometer_monitor() {
+  if (!monitorImuOk) {
+    Serial.println("calibrateMagnetometer_monitor: monitor IMU not initialised — skipping.");
+    return;
+  }
   Serial.println("Beginning MONITOR IMU (Wire1) magnetometer calibration in");
   Serial.println("3...");
   delay(1000);
@@ -375,13 +389,13 @@ void calibrateMagnetometerMonitor() {
   const int success = MON_OBJ.calibrateMag();
   if (success) {
     Serial.println("MONITOR IMU Calibration Successful!");
-    Serial.println("Comment out calibrateMagnetometer() and copy:");
-    Serial.print("float MagErrorX = "); Serial.print(MON_OBJ.getMagBiasX_uT()); Serial.println(";");
-    Serial.print("float MagErrorY = "); Serial.print(MON_OBJ.getMagBiasY_uT()); Serial.println(";");
-    Serial.print("float MagErrorZ = "); Serial.print(MON_OBJ.getMagBiasZ_uT()); Serial.println(";");
-    Serial.print("float MagScaleX = "); Serial.print(MON_OBJ.getMagScaleFactorX()); Serial.println(";");
-    Serial.print("float MagScaleY = "); Serial.print(MON_OBJ.getMagScaleFactorY()); Serial.println(";");
-    Serial.print("float MagScaleZ = "); Serial.print(MON_OBJ.getMagScaleFactorZ()); Serial.println(";");
+    Serial.println("Comment out calibrateMagnetometer_monitor() and copy:");
+    Serial.print("float MagErrorX_mon = "); Serial.print(MON_OBJ.getMagBiasX_uT()); Serial.println(";");
+    Serial.print("float MagErrorY_mon = "); Serial.print(MON_OBJ.getMagBiasY_uT()); Serial.println(";");
+    Serial.print("float MagErrorZ_mon = "); Serial.print(MON_OBJ.getMagBiasZ_uT()); Serial.println(";");
+    Serial.print("float MagScaleX_mon = "); Serial.print(MON_OBJ.getMagScaleFactorX()); Serial.println(";");
+    Serial.print("float MagScaleY_mon = "); Serial.print(MON_OBJ.getMagScaleFactorY()); Serial.println(";");
+    Serial.print("float MagScaleZ_mon = "); Serial.print(MON_OBJ.getMagScaleFactorZ()); Serial.println(";");
     Serial.println("Mag params apply in getIMUdataMonitor() for 9-DOF Madgwick.");
   } else {
     Serial.println("MONITOR IMU Calibration Unsuccessful. Reset and retry.");
