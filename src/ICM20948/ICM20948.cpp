@@ -463,6 +463,7 @@ int ICM20948::calibrateMag() {
   _hzmax = hz0; _hzmin = hz0; _hzfilt = hz0;
 
   _counter = 0;
+  int print_counter = 0;
 
   while (_counter < _maxCounts) {
     _delta = 0.0f;
@@ -531,6 +532,16 @@ int ICM20948::calibrateMag() {
       _counter = 0;  // still rotating → reset convergence counter
     } else {
       _counter++;    // stationary → converging
+    }
+
+    print_counter++;
+    if (print_counter >= 50) { // every ~1 second (50 * 20ms)
+      print_counter = 0;
+      if (_counter == 0) {
+        Serial.println("  Reading... (keep rotating)");
+      } else {
+        Serial.print("  Stillness: "); Serial.print(_counter / 10); Serial.println("%");
+      }
     }
 
     delay(20);
