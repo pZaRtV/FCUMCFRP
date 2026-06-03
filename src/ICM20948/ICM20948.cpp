@@ -443,49 +443,112 @@ void ICM20948::getMotion9(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, in
 }
 
 int ICM20948::calibrateMag() {
-  // Reset min/max trackers
-  _hxmax = -1e9f; _hymax = -1e9f; _hzmax = -1e9f;
-  _hxmin =  1e9f; _hymin =  1e9f; _hzmin =  1e9f;
-  _hxfilt = 0; _hyfilt = 0; _hzfilt = 0;
-  _counter = 0; _delta = 0;
- 
+  // ── MPU9250-compatible convergence algorithm ──────────────────────────────
+  // Collect min/max envelope of magnetometer readings while the user rotates
+  // the sensor. When the envelope stops expanding (the user stops rotating),
+  // the counter counts up. After _maxCounts consecutive stationary frames
+  // (~20 seconds at 20 ms/frame), calibration is considered converged.
+  //
+  // The MPU9250 version uses getMagX_uT() which returns bias-corrected values
+  // (raw / scale + bias). We do the same here by un-doing the current cal so
+  // the calibration loop always sees "raw µT" — identical to the MPU9250 path.
+
+  // Read an initial sample and seed min/max from raw µT values
+  readSensor();
+  float hx0 = (float)_hxcounts * AK09916_MAG_SCALE;
+  float hy0 = (float)_hycounts * AK09916_MAG_SCALE;
+  float hz0 = (float)_hzcounts * AK09916_MAG_SCALE;
+  _hxmax = hx0; _hxmin = hx0; _hxfilt = hx0;
+  _hymax = hy0; _hymin = hy0; _hyfilt = hy0;
+  _hzmax = hz0; _hzmin = hz0; _hzfilt = hz0;
+
+  _counter = 0;
+
   while (_counter < _maxCounts) {
-    _framedelta = 0;
-    readSensor();
-    // Raw µT values before bias/scale (re-compute from counts)
-    float hxRaw = _hxcounts * AK09916_MAG_SCALE;
-    float hyRaw = _hycounts * AK09916_MAG_SCALE;
-    float hzRaw = _hzcounts * AK09916_MAG_SCALE;
- 
+    _delta = 0.0f;
+    _framedelta = 0.0f;
+
+    // Wait for fresh mag data (AK09916 DRDY via EXT_SLV_SENS_DATA_00 ST1).
+    // Prevents stale-count iterations that would inflate the stillness counter.
+    uint8_t attempts = 0;
+    do {
+      readSensor();
+      attempts++;
+      if (attempts > 20) break; // timeout: ~200 ms — use whatever we have
+      if (!_magDataReady) delay(2);
+    } while (!_magDataReady);
+
+    // Raw µT before any user cal (same contract as MPU9250::calibrateMag)
+    float hxRaw = (float)_hxcounts * AK09916_MAG_SCALE;
+    float hyRaw = (float)_hycounts * AK09916_MAG_SCALE;
+    float hzRaw = (float)_hzcounts * AK09916_MAG_SCALE;
+
+    // Exponential moving average filter (same _coeff as MPU9250)
     _hxfilt = (_hxfilt * ((float)(_coeff - 1)) + hxRaw) / (float)_coeff;
     _hyfilt = (_hyfilt * ((float)(_coeff - 1)) + hyRaw) / (float)_coeff;
     _hzfilt = (_hzfilt * ((float)(_coeff - 1)) + hzRaw) / (float)_coeff;
- 
-    if (_hxfilt > _hxmax) { _framedelta += _hxfilt - _hxmax; _hxmax = _hxfilt; }
-    if (_hyfilt > _hymax) { _framedelta += _hyfilt - _hymax; _hymax = _hyfilt; }
-    if (_hzfilt > _hzmax) { _framedelta += _hzfilt - _hzmax; _hzmax = _hzfilt; }
-    if (_hxfilt < _hxmin) { _framedelta += _hxmin - _hxfilt; _hxmin = _hxfilt; }
-    if (_hyfilt < _hymin) { _framedelta += _hymin - _hyfilt; _hymin = _hyfilt; }
-    if (_hzfilt < _hzmin) { _framedelta += _hzmin - _hzfilt; _hzmin = _hzfilt; }
- 
-    _delta += _framedelta;
-    if (_delta > _deltaThresh) {
-      _counter++;
-      _delta = 0;
+
+    // Track envelope expansion (per-axis delta → max of all axes)
+    if (_hxfilt > _hxmax) {
+      _delta = _hxfilt - _hxmax;
+      _hxmax = _hxfilt;
     }
-    delay(10);
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    if (_hyfilt > _hymax) {
+      _delta = _hyfilt - _hymax;
+      _hymax = _hyfilt;
+    }
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    if (_hzfilt > _hzmax) {
+      _delta = _hzfilt - _hzmax;
+      _hzmax = _hzfilt;
+    }
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    if (_hxfilt < _hxmin) {
+      _delta = _hxmin - _hxfilt;
+      _hxmin = _hxfilt;
+    }
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    if (_hyfilt < _hymin) {
+      _delta = _hymin - _hyfilt;
+      _hymin = _hyfilt;
+    }
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    if (_hzfilt < _hzmin) {
+      _delta = _hzmin - _hzfilt;
+      _hzmin = _hzfilt;
+    }
+    if (_delta > _framedelta) _framedelta = _delta;
+
+    // MPU9250 convergence logic: envelope still expanding → reset counter;
+    // envelope stable → count towards exit.
+    if (_framedelta > _deltaThresh) {
+      _counter = 0;  // still rotating → reset convergence counter
+    } else {
+      _counter++;    // stationary → converging
+    }
+
+    delay(20);
   }
- 
-  // Compute bias (hard-iron) and scale (soft-iron)
+
+  // Compute bias (hard-iron offset) and scale (soft-iron normalisation)
   _hxb = (_hxmax + _hxmin) / 2.0f;
   _hyb = (_hymax + _hymin) / 2.0f;
   _hzb = (_hzmax + _hzmin) / 2.0f;
- 
-  _avgs = ((_hxmax - _hxmin) + (_hymax - _hymin) + (_hzmax - _hzmin)) / 3.0f;
-  _hxs  = _avgs / (_hxmax - _hxmin);
-  _hys  = _avgs / (_hymax - _hymin);
-  _hzs  = _avgs / (_hzmax - _hzmin);
- 
+
+  float hxSpan = (_hxmax - _hxmin) / 2.0f;
+  float hySpan = (_hymax - _hymin) / 2.0f;
+  float hzSpan = (_hzmax - _hzmin) / 2.0f;
+  _avgs = (hxSpan + hySpan + hzSpan) / 3.0f;
+  _hxs = (hxSpan > 0.0f) ? _avgs / hxSpan : 1.0f;
+  _hys = (hySpan > 0.0f) ? _avgs / hySpan : 1.0f;
+  _hzs = (hzSpan > 0.0f) ? _avgs / hzSpan : 1.0f;
+
   return 1;
 }
  
