@@ -152,8 +152,8 @@
   // i-BUS Configuration
   // FS-iA6B dedicated i-BUS port → Teensy Serial3 RX (pin 15)
 // Serial3 is free — not used by motors, servos,IMU, or Ethernet
-#define IBUS_SERIAL       Serial3
-#define IBUS_UART_PIN     15    // Serial3 RX pin on Teensy 4.0
+#define IBUS_SERIAL       Serial5
+#define IBUS_UART_PIN     21    // Serial5 RX pin on Teensy 4.0
 
 // i-BUS channel mapping — remapped to match FS-i6 Mode 2 output
 // FS-i6 physical output: CH1=Roll, CH2=Pitch, CH3=Throttle, CH4=Yaw
