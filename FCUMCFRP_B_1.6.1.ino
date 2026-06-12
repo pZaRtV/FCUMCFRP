@@ -217,12 +217,12 @@ float MagScaleZ_main = 1.0;
 
 // Magnetometer calibration — MONITOR IMU (MPU9250/ICM20948 on Wire1)
 // Calibrate using calibrateMagnetometer_monitor() in setup → paste values here.
-float MagErrorX_mon = 0.0;
-float MagErrorY_mon = 0.0;
-float MagErrorZ_mon = 0.0;
-float MagScaleX_mon = 1.0;
-float MagScaleY_mon = 1.0;
-float MagScaleZ_mon = 1.0;
+float MagErrorX_mon = 13.12;
+float MagErrorY_mon = 0.22;
+float MagErrorZ_mon = 23.30;
+float MagScaleX_mon = 0.94;
+float MagScaleY_mon = 1.09;
+float MagScaleZ_mon = 0.98;
 
 // Legacy calibration parameters (deprecated - kept for backward compatibility)
 // NOTE: These are no longer used. Use the _main and _mon versions above instead.
@@ -1973,9 +1973,23 @@ void getCommands() {
 
   #elif defined USE_IBUS_RX
     // i-BUS: read() returns true only when a complete valid frame arrives.
-    // If no new frame this loop iteration, channel values hold from last
-    // valid frame — correct behavior, do not update pwm values.
-    if (ibus.read(ibusChannels, &ibusFailSafe, &ibusLostFrame)) {
+    // On signal loss, ibusFailSafe is set by the timeout in iBus.cpp.
+    // We must explicitly apply failsafe values here — the channel variables
+    // are NOT updated when read() returns false, so they silently hold the
+    // last valid PWM. Because those values are in-range (800-2200), failSafe()
+    // would never detect the signal loss. Writing fs values here ensures
+    // throttleCut() fires and motors stop immediately on disconnection.
+    ibus.read(ibusChannels, &ibusFailSafe, &ibusLostFrame);
+    if (ibusFailSafe) {
+      // Signal lost: force all channels to failsafe values (ch5 high = throttle cut)
+      channel_1_pwm = channel_1_fs;
+      channel_2_pwm = channel_2_fs;
+      channel_3_pwm = channel_3_fs;
+      channel_4_pwm = channel_4_fs;
+      channel_5_pwm = channel_5_fs;
+      channel_6_pwm = channel_6_fs;
+    } else if (!ibusLostFrame) {
+      // Valid frame received: update channels normally
       channel_1_pwm = ibusChannels[IBUS_MAP_CH1 - 1];
       channel_2_pwm = ibusChannels[IBUS_MAP_CH2 - 1];
       channel_3_pwm = ibusChannels[IBUS_MAP_CH3 - 1];
@@ -1983,8 +1997,7 @@ void getCommands() {
       channel_5_pwm = ibusChannels[IBUS_MAP_CH5 - 1];
       channel_6_pwm = ibusChannels[IBUS_MAP_CH6 - 1];
     }
-    // ibusFailSafe true → failSafe() will catch out-of-range values
-    // ibusLostFrame true → checksum failed, values not updated (held)
+    // ibusLostFrame (checksum mismatch only) → hold last values, do not update
   #endif
   
   //Low-pass the critical commands and update previous values
