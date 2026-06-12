@@ -223,6 +223,18 @@ void networkInit() {
 
   // Start Ethernet connection (DHCP)
   Serial.print("Initializing Ethernet...");
+  
+  Ethernet.init(W5500_CS_PIN);
+  
+  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+    Serial.println("\n[FATAL] W5500 Ethernet hardware not found! Check SPI wiring and CS pin.");
+    monitorImuOk = false; // soft-disable network features
+    return;
+  }
+  if (Ethernet.linkStatus() == LinkOFF) {
+    Serial.println("\n[WARNING] Ethernet cable is not connected.");
+  }
+
   if (Ethernet.begin(mac) == 0) {
     Serial.println("Failed to configure Ethernet using DHCP");
     // Try static IP as fallback
