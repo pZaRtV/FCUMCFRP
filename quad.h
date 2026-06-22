@@ -25,21 +25,32 @@
 // Select ONE primary IMU (used by control loop):
 #define USE_MPU6050_I2C
 // #define USE_MPU9250_SPI
+// #define USE_ICM20948_I2C
 
+// select one Monitor IMU (comment both out to disable monitor IMU entirely)
 // #define USE_MPU9250_MONITOR_I2C
+#define USE_ICM20948_MONITOR_I2C
+
+// UDP telemetry toggle — requires a monitor IMU and W5500 Ethernet module.
+// Comment out to disable Ethernet/UDP entirely (e.g. bench testing without W5500).
+// The monitor IMU (ICM20948/MPU9250) will still run and log via Serial if this is off.
+#define USE_UDP_TELEMETRY
 
 // Ethernet/W5500 Configuration for UDP telemetry
 #define W5500_CS_PIN 10
 #define W5500_SPI_BUS SPI
-#define UDP_LOCAL_PORT 8888
+#define UDP_LOCAL_PORT 8889
 #define UDP_REMOTE_PORT 8889
 #define UDP_REMOTE_IP_0 192
 #define UDP_REMOTE_IP_1 168
-#define UDP_REMOTE_IP_2 1
+#define UDP_REMOTE_IP_2 113
 #define UDP_REMOTE_IP_3 100
-#define MONITOR_UDP_RATE_MS 10
+#define MONITOR_UDP_RATE_MS 5      // 200 Hz — captures up to 100 Hz dynamics (Nyquist) for beta study
 
+// Monitor runs 9-DOF Madgwick for mon_* attitude in UDP; err_* / diff_* computed in FlightlogAnalysis.py.
 #define USE_MONITOR_ATTITUDE_COMPARISON
+
+#define B_MADGWICK_MONITOR 0.041f
 
 // Select ONE full scale gyro range (deg/sec):
 #define GYRO_250DPS
@@ -53,7 +64,35 @@
 // #define ACCEL_8G
 // #define ACCEL_16G
 
+// ── Bus assignment — HARDCODED, NON-NEGOTIABLE ──────────────────────────
+// Teensy 4.0 pin assignments (cannot be changed in quad.h alone — driver
+// constructor call sites in IMUinit() / monitorIMUinit() must also change):
+//
+//   Wire  (I2C0): SDA  = pin 18, SCL  = pin 19  ← MAIN I2C IMU only
+//   Wire1 (I2C1): SDA1 = pin 16, SCL1 = pin 17  ← MONITOR IMU only (always)
+//   SPI:          MOSI = pin 11, MISO = pin 12, SCK = pin 13  ← MPU9250 main
+//
+// Wire and Wire1 are on separate CCM clock domains; Wire1 must be initialised
+// before Wire to avoid I2C clock-gating contention (enforced by setup() order).
+//
+// Main (MPU6050) and monitor (MPU9250 / ICM20948) MUST use the same GYRO_* and ACCEL_* above.
+// Main scales raw int16 with GYRO_SCALE_FACTOR / ACCEL_SCALE_FACTOR in FCUMCFRP_B_1.4.6L.ino.
+// Monitor FS + MON_OBJ path: imuMonitor.ino (GYRO_MON_SCALE / ACCEL_MON_SCALE, shared driver API).
+
+// Resolved bus aliases (read-only — do NOT redefine):
+#if defined(USE_MPU6050_I2C) || defined(USE_ICM20948_I2C)
+  #define MAIN_IMU_BUS   Wire    // I2C0: pins 18/19
+#elif defined(USE_MPU9250_SPI)
+  #define MAIN_IMU_BUS   SPI     // SPI: pins 11/12/13 + CS
+#endif
+
+#if defined(USE_MPU9250_MONITOR_I2C) || defined(USE_ICM20948_MONITOR_I2C)
+  #define MONITOR_IMU_BUS Wire1  // I2C1: pins 16/17 — always Wire1, no exceptions
+#endif
+
 // #define USE_ONESHOT125_ESC
+
+// #define USE_MANEUVER_SEQUENCE  // uncomment for maneuver sorties
 
 // PPM channel mapping (logical -> physical PPM slot, 1-based)
 // CH1=Throttle, CH2=Aileron, CH3=Elevator, CH4=Rudder, CH5=Gear, CH6=Aux1
@@ -165,8 +204,18 @@
 #error "You must define exactly one receiver type in quad.h."
 #endif
 
-#if (defined(USE_MPU6050_I2C) + defined(USE_MPU9250_SPI)) != 1
-#error "You must define exactly one IMU in quad.h."
+#if (defined(USE_MPU6050_I2C) + defined(USE_MPU9250_SPI) + defined(USE_ICM20948_I2C)) != 1
+#error "You must define exactly one main control IMU in quad.h."
+#endif
+
+// Monitor IMU: allow 0 (disabled) or 1 (enabled). Exactly one if enabled.
+#if (defined(USE_MPU9250_MONITOR_I2C) + defined(USE_ICM20948_MONITOR_I2C)) > 1
+#error "Define at most one monitor IMU in quad.h (or comment both out to disable)."
+#endif
+
+// UDP telemetry requires a monitor IMU
+#if defined(USE_UDP_TELEMETRY) && !defined(USE_MPU9250_MONITOR_I2C) && !defined(USE_ICM20948_MONITOR_I2C)
+#error "USE_UDP_TELEMETRY requires a monitor IMU (USE_MPU9250_MONITOR_I2C or USE_ICM20948_MONITOR_I2C)."
 #endif
 
 #if (defined(GYRO_250DPS) + defined(GYRO_500DPS) + defined(GYRO_1000DPS) + defined(GYRO_2000DPS)) != 1
@@ -180,6 +229,37 @@
 // Safety: catch USE_PWM_PASSTHROUGH_CH1 being re-enabled alongside USE_PPM_RX
 #if defined(USE_PPM_RX) && defined(USE_PWM_PASSTHROUGH_CH1)
 #error "USE_PWM_PASSTHROUGH_CH1 must not be defined when USE_PPM_RX is active. See quad.h FIX 10 comment."
+#endif
+
+// ── Bus conflict guards ────────────────────────────────────────────────────
+// Monitor IMU is ALWAYS Wire1. Defining a monitor IMU without Wire1 support
+// (e.g., copying the main I2C address to Wire) is a wiring error.
+// The guards below catch the only software-detectable conflict: SPI CS pin clash.
+
+// Guard: MPU9250 SPI CS pin must not collide with W5500 CS pin.
+#if defined(USE_MPU9250_SPI) && defined(W5500_CS_PIN)
+  #ifdef MPU9250_CS_PIN
+    #if MPU9250_CS_PIN == W5500_CS_PIN
+    #error "MPU9250_CS_PIN and W5500_CS_PIN are the same. They share the SPI bus but must have distinct CS pins."
+    #endif
+  #endif
+#endif
+
+// Guard: ICM20948 used as both main I2C (Wire) and monitor I2C (Wire1) is valid
+// because they are on separate buses. Same-chip, different bus = no address conflict.
+// This configuration is explicitly supported and tested.
+#if defined(USE_ICM20948_I2C) && defined(USE_ICM20948_MONITOR_I2C)
+  // Valid: ICM20948 main on Wire (pin 18/19), monitor on Wire1 (pin 16/17).
+  // Auto-detect in monitorIMUinit() resolves address independently on Wire1.
+#endif
+
+// Guard: MPU9250 cannot be used as both main SPI and monitor I2C simultaneously
+// IF they share the same physical chip (hardware constraint, not software).
+// Two separate MPU9250 chips (one SPI, one I2C/Wire1) is valid.
+#if defined(USE_MPU9250_SPI) && defined(USE_MPU9250_MONITOR_I2C)
+  // Allowed only if two physically separate MPU9250 chips are present.
+  // If only one chip exists, connect it to SPI (main) OR Wire1 (monitor), not both.
+  // No compile-time check possible — enforced by hardware wiring.
 #endif
 
 #endif // FC_QUAD_H
