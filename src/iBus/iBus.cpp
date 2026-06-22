@@ -21,7 +21,6 @@ bool IBUS::read(uint16_t* channels, bool* failsafe, bool* lostFrame) {
   // FIX 4: Timeout tracks time since last VALID frame, not last byte.
   // Moved _ibusTime reset into the valid frame branch below.
   if (_ibusTime > IBUS_TIMEOUT_US) {
-    _parserState = 0;
     if (lostFrame) *lostFrame = true;
     if (failsafe)  *failsafe  = true;
   }
