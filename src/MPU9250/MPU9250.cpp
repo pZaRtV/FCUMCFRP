@@ -20,6 +20,55 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SO
 #include "Arduino.h"
 #include "MPU9250.h"
 
+namespace {
+
+bool wireAckAt(TwoWire &bus, uint8_t address) {
+  bus.beginTransmission(address);
+  return bus.endTransmission() == 0;
+}
+
+bool mpu9250WhoAmIAt(TwoWire &bus, uint8_t address, uint8_t *whoAmI) {
+  if (!wireAckAt(bus, address)) {
+    return false;
+  }
+  bus.beginTransmission(address);
+  bus.write(0x75);  // WHO_AM_I
+  if (bus.endTransmission(false) != 0) {
+    return false;
+  }
+  if (bus.requestFrom((int)address, 1) != 1) {
+    return false;
+  }
+  *whoAmI = bus.read();
+  return true;
+}
+
+bool mpu9250IdValid(uint8_t id) {
+  return (id == 0x71) || (id == 0x73);  // 0x73 on some MPU-9250 clones
+}
+
+}  // namespace
+
+void MPU9250::setAddress(uint8_t address) {
+  if (!_useSPI) {
+    _address = address;
+  }
+}
+
+uint8_t MPU9250::detectOnBus(TwoWire &bus) {
+  static const uint8_t kCandidates[] = {
+      MPU9250::I2C_ADDR_HIGH,
+      MPU9250::I2C_ADDR_LOW,
+  };
+  for (uint8_t addr : kCandidates) {
+    uint8_t who = 0;
+    if (mpu9250WhoAmIAt(bus, addr, &who) && mpu9250IdValid(who)) {
+      return addr;
+    }
+  }
+  return 0;
+}
+
 /* MPU9250 object, input the I2C bus and address */
 MPU9250::MPU9250(TwoWire &bus,uint8_t address){
   _i2c = &bus; // I2C bus
@@ -839,6 +888,7 @@ int MPU9250::calibrateMag() {
 
   // collect data to find max / min in each channel
   _counter = 0;
+  int print_counter = 0;
   while (_counter < _maxCounts) {
     _delta = 0.0f;
     _framedelta = 0.0f;
@@ -893,6 +943,17 @@ int MPU9250::calibrateMag() {
     } else {
       _counter++;
     }
+
+    print_counter++;
+    if (print_counter >= 50) { // every ~1 second (50 * 20ms)
+      print_counter = 0;
+      if (_counter == 0) {
+        Serial.println("  Reading... (keep rotating)");
+      } else {
+        Serial.print("  Stillness: "); Serial.print(_counter / 10); Serial.println("%");
+      }
+    }
+
     delay(20);
   }
 

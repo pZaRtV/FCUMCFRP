@@ -26,6 +26,9 @@
 #include "Wire.h"    // I2C library
 #include "SPI.h"     // SPI library
 
+// 9-DOF driver (MPU-9250 + AK8963). Sibling: src/ICM20948/ (ICM-20948 + AK09916).
+// Shared monitor API: readSensor(), get*_*(), setMagCal*, getMotion6/9.
+// Differences: SPI/FIFO/accel-cal here; ICM uses banked regs + fixed 0.15 µT/LSB mag.
 class MPU9250{
   public:
     enum GyroRange
@@ -66,8 +69,14 @@ class MPU9250{
       LP_ACCEL_ODR_250HZ = 10,
       LP_ACCEL_ODR_500HZ = 11
     };
+    static const uint8_t I2C_ADDR_LOW  = 0x68;
+    static const uint8_t I2C_ADDR_HIGH = 0x69;
+
     MPU9250(TwoWire &bus,uint8_t address);
     MPU9250(SPIClass &bus,uint8_t csPin);
+    void setAddress(uint8_t address);
+    uint8_t getAddress() const { return _address; }
+    static uint8_t detectOnBus(TwoWire &bus);
     int begin();
     int setAccelRange(AccelRange range);
     int setGyroRange(GyroRange range);
