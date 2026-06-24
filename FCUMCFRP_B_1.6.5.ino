@@ -376,6 +376,9 @@ float MagX_mon_prev, MagY_mon_prev, MagZ_mon_prev;
 float roll_IMU_mon, pitch_IMU_mon, yaw_IMU_mon;
 // Separate quaternion state for monitor IMU Madgwick filter (always used for UDP telemetry)
 float q0_mon = 1.0f, q1_mon = 0.0f, q2_mon = 0.0f, q3_mon = 0.0f;
+// Boot-level attitude origin for monitor IMU (mirrors roll/pitch_level_offset of main IMU)
+float roll_level_offset_mon  = 0.0f;
+float pitch_level_offset_mon = 0.0f;
 #endif
 
 // Ethernet and UDP variables (declared in imuMonitor.ino)
@@ -451,6 +454,7 @@ void stabilizeMainIMU();
 // Monitor IMU functions
 #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
 void monitorIMUinit();         // IMU hardware only (Wire1 + ICM20948/MPU9250)
+void stabilizeMonitorIMU();    // Mirror of stabilizeMainIMU(): quaternion reset + level offsets + mag LP seed
 void networkInit();            // Ethernet + UDP — called after calibration, before flight loop
 void runMonitorImuLoopStep(float dt);
 void calculate_IMU_error_monitor();
@@ -736,6 +740,15 @@ void setup() {
   // ── Main IMU warmup: LP settle + origin reset ─────────────────────────────
   // Vehicle should be level and still (props off). Sets roll0/pitch0/yaw0 = 0.
   stabilizeMainIMU();
+
+  // ── Monitor IMU warmup (mirrors stabilizeMainIMU) ─────────────────────────
+  // Resets q0_mon quaternion, seeds LP filter, captures level offsets, zeros
+  // magnetometer LP prev-state — all in identical order to the main IMU.
+  #if defined USE_MPU9250_MONITOR_I2C || defined USE_ICM20948_MONITOR_I2C
+    if (monitorImuOk) {
+      stabilizeMonitorIMU();
+    }
+  #endif
 
   // ── Network init (Ethernet + UDP) ────────────────────────────────────────
   // Intentionally placed AFTER all calibration routines and the safety halt.
