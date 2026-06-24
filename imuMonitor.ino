@@ -44,8 +44,14 @@ extern float AccX_mon_prev, AccY_mon_prev, AccZ_mon_prev;
 extern float GyroX_mon_prev, GyroY_mon_prev, GyroZ_mon_prev;
 extern float MagX_mon_prev, MagY_mon_prev, MagZ_mon_prev;
 extern float roll_IMU_mon, pitch_IMU_mon, yaw_IMU_mon;
+extern float roll_level_offset_mon, pitch_level_offset_mon;
 extern float q0_mon, q1_mon, q2_mon, q3_mon;
 extern float AccX, AccY, AccZ, GyroX, GyroY, GyroZ, MagX, MagY, MagZ;
+
+// Main IMU state for telemetry alignment
+extern float roll_level_offset, pitch_level_offset;
+extern float ROLL_TRIM_DEG, PITCH_TRIM_DEG;
+extern const float NMNI_GYRO_THRESH_DPS;
 extern float roll_IMU, pitch_IMU, yaw_IMU;
 extern float thro_des, roll_des, pitch_des, yaw_des;
 extern bool armedFly;
@@ -207,10 +213,95 @@ void monitorIMUinit() {
   MON_OBJ.setGyroRange(GYRO_MON_SCALE);
   MON_OBJ.setAccelRange(ACCEL_MON_SCALE);
   
+  // Hardware DLPF — block motor frame vibrations, matching the main IMU's mpu6050.setDLPFMode(3) = 42 Hz.
+  // Each driver has the same setDlpfBandwidth() API but different enum namespaces.
+  #if defined USE_ICM20948_MONITOR_I2C
+    MON_OBJ.setDlpfBandwidth(ICM20948::DLPF_BANDWIDTH_51HZ);  // 51 Hz — closest ICM-20948 step above 42 Hz
+  #elif defined USE_MPU9250_MONITOR_I2C
+    MON_OBJ.setDlpfBandwidth(MPU9250::DLPF_BANDWIDTH_41HZ);   // 41 Hz — closest MPU9250 step below 42 Hz
+  #endif
   // Magnetometer bias/scale applied once in getIMUdataMonitor() (not in driver).
   MON_OBJ.setSrd(0); // max rate accel/gyro; mag ~100 Hz on AK09916
   // Network (Ethernet + UDP) is initialised separately in networkInit(),
   // called from setup() after all calibration routines have completed.
+}
+
+// ── stabilizeMonitorIMU ───────────────────────────────────────────────────────
+// Mirrors stabilizeMainIMU() exactly for the monitor IMU (MPU9250 / ICM20948).
+// Must be called AFTER monitorIMUinit() and calculate_IMU_error_monitor() so
+// calibration offsets are already populated.
+// On return: q0_mon/q1_mon/q2_mon/q3_mon = identity, roll/pitch_level_offset_mon
+// are captured, and all LP prev-state buffers (accel / gyro / mag) are seeded.
+void stabilizeMonitorIMU() {
+  if (!monitorImuOk) return; // soft-fail if hardware absent
+
+  Serial.println(F("[monitor] Stabilizing monitor IMU (settle + origin reset)..."));
+
+  // ── Step 1: Zero quaternion and attitude angles ──────────────────────────
+  q0_mon = 1.0f; q1_mon = 0.0f; q2_mon = 0.0f; q3_mon = 0.0f;
+  roll_IMU_mon  = 0.0f;
+  pitch_IMU_mon = 0.0f;
+  yaw_IMU_mon   = 0.0f;
+
+  // ── Step 2: Seed LP filter prev-state from one corrected live sample ─────
+  MON_OBJ.readSensor();
+
+  float ax = MON_OBJ.getAccelX_mss() / 9.807f - AccErrorX_mon;
+  float ay = MON_OBJ.getAccelY_mss() / 9.807f - AccErrorY_mon;
+  float az = MON_OBJ.getAccelZ_mss() / 9.807f - AccErrorZ_mon;
+  float gx = MON_OBJ.getGyroX_rads() * 57.29577951f - GyroErrorX_mon;
+  float gy = MON_OBJ.getGyroY_rads() * 57.29577951f - GyroErrorY_mon;
+  float gz = MON_OBJ.getGyroZ_rads() * 57.29577951f - GyroErrorZ_mon;
+  float mx_r = (MON_OBJ.getMagX_uT() - MagErrorX_mon) * MagScaleX_mon;
+  float my_r = (MON_OBJ.getMagY_uT() - MagErrorY_mon) * MagScaleY_mon;
+  float mz_r = (MON_OBJ.getMagZ_uT() - MagErrorZ_mon) * MagScaleZ_mon;
+
+  AccX_mon_prev  = ax;  AccY_mon_prev  = ay;  AccZ_mon_prev  = az;
+  GyroX_mon_prev = gx;  GyroY_mon_prev = gy;  GyroZ_mon_prev = gz;
+  MagX_mon_prev  = mx_r; MagY_mon_prev = my_r; MagZ_mon_prev = mz_r;
+  AccX_mon = ax; AccY_mon = ay; AccZ_mon = az;
+  GyroX_mon = gx; GyroY_mon = gy; GyroZ_mon = gz;
+  MagX_mon = mx_r; MagY_mon = my_r; MagZ_mon = mz_r;
+
+  // ── Step 3: LP settle loop (matches IMU_SETTLE_MS on main IMU) ───────────
+  const unsigned long SETTLE_MS = 2500;
+  unsigned long t0 = millis();
+  while (millis() - t0 < SETTLE_MS) {
+    getIMUdataMonitor();
+    delay(1); // ~1 kHz settle rate, no Madgwick needed during LP warm-up
+  }
+
+  // ── Step 4: Single Madgwick pass to compute initial attitude ─────────────
+  //    Use a large beta (0.5) to snap quickly to the gravity vector.
+  getIMUdataMonitor();
+  MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon,
+                   AccX_mon,  AccY_mon,   AccZ_mon,
+                   MagY_mon, -MagX_mon,   MagZ_mon,
+                  0.5f); // fast convergence on gravity
+
+  // ── Step 5: Capture level offsets (mirrors roll/pitch_level_offset) ──────
+  roll_level_offset_mon  = roll_IMU_mon;
+  pitch_level_offset_mon = pitch_IMU_mon;
+
+  // ── Step 6: Reset quaternion to identity (clean origin for flight) ───────
+  q0_mon = 1.0f; q1_mon = 0.0f; q2_mon = 0.0f; q3_mon = 0.0f;
+  roll_IMU_mon  = 0.0f;
+  pitch_IMU_mon = 0.0f;
+  yaw_IMU_mon   = 0.0f;
+
+  // Re-seed LP prev-state from the settled sample so first flight loop delta is clean
+  AccX_mon_prev  = AccX_mon;  AccY_mon_prev  = AccY_mon;  AccZ_mon_prev  = AccZ_mon;
+  GyroX_mon_prev = GyroX_mon; GyroY_mon_prev = GyroY_mon; GyroZ_mon_prev = GyroZ_mon;
+  MagX_mon_prev  = MagX_mon;  MagY_mon_prev  = MagY_mon;  MagZ_mon_prev  = MagZ_mon;
+
+  Serial.print(F("[monitor] level offsets roll/pitch="));
+  Serial.print(roll_level_offset_mon, 2);
+  Serial.print(F(","));
+  Serial.println(pitch_level_offset_mon, 2);
+  // Anchor UDP rate-limiter clock so the first loop doesn't fire a burst
+  // of stale packets immediately after the 2.5 s settle loop finishes.
+  lastUdpSend = millis();
+  Serial.println(F("[monitor] Monitor IMU origin set — quaternion zeroed, LP seeded."));
 }
 
 // Initialize W5500 Ethernet + UDP pipeline.
@@ -266,7 +357,7 @@ void networkInit() {
 
 void runMonitorImuLoopStep(float dt) {
   getIMUdataMonitor();
-  MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, -AccX_mon, AccY_mon, AccZ_mon,
+  MadgwickMonitor(GyroX_mon, -GyroY_mon, -GyroZ_mon, AccX_mon, AccY_mon, AccZ_mon,
                   MagY_mon, -MagX_mon, MagZ_mon, dt);
   // UDP send is conditional: disable USE_UDP_TELEMETRY in quad.h to skip network entirely.
   // Sensor reads and Madgwick always run regardless, for attitude validity.
@@ -535,6 +626,15 @@ void Madgwick6DOFMonitor(float gx, float gy, float gz, float ax, float ay, float
   float qDot1, qDot2, qDot3, qDot4;
   float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2 ,_8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
 
+  // NMNI: no motion → no gyro integration (6DOF has no yaw reference;
+  // residual Z-gyro bias otherwise sweeps yaw_IMU_mon on the bench).
+  // Mirrors Madgwick6DOF() in the main flight controller exactly.
+  if (fabsf(gx) < NMNI_GYRO_THRESH_DPS && fabsf(gy) < NMNI_GYRO_THRESH_DPS && fabsf(gz) < NMNI_GYRO_THRESH_DPS) {
+    gx = 0.0f;
+    gy = 0.0f;
+    gz = 0.0f;
+  }
+
   // Convert gyroscope degrees/sec to radians/sec
   gx *= 0.0174533f;
   gy *= 0.0174533f;
@@ -764,13 +864,17 @@ void sendIMUDataUDP() {
   dataPacket.mon_mag_z = MagZ_mon;
   
   // --- Attitudes (each IMU) ---
-  dataPacket.ctrl_roll = roll_IMU;
-  dataPacket.ctrl_pitch = pitch_IMU;
-  dataPacket.ctrl_yaw = yaw_IMU;
-  
-  dataPacket.mon_roll = roll_IMU_mon;
-  dataPacket.mon_pitch = pitch_IMU_mon;
-  dataPacket.mon_yaw = yaw_IMU_mon;
+  // ctrl_* mirrors exactly what the PID controller uses:
+  //   roll_IMU - roll_level_offset - ROLL_TRIM_DEG
+  // This lets FlightlogAnalysis.py compare raw error with zero post-correction needed.
+  dataPacket.ctrl_roll  = roll_IMU  - roll_level_offset  - ROLL_TRIM_DEG;
+  dataPacket.ctrl_pitch = pitch_IMU - pitch_level_offset - PITCH_TRIM_DEG;
+  dataPacket.ctrl_yaw   = yaw_IMU;
+
+  // mon_* subtracts the monitor IMU's own boot-level offset for a matching zero-reference.
+  dataPacket.mon_roll  = roll_IMU_mon  - roll_level_offset_mon;
+  dataPacket.mon_pitch = pitch_IMU_mon - pitch_level_offset_mon;
+  dataPacket.mon_yaw   = yaw_IMU_mon;
 
   IPAddress remoteIP(UDP_REMOTE_IP_0, UDP_REMOTE_IP_1, UDP_REMOTE_IP_2, UDP_REMOTE_IP_3);
   Udp.beginPacket(remoteIP, UDP_REMOTE_PORT);
