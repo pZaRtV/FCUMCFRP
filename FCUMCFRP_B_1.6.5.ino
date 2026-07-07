@@ -190,12 +190,12 @@ const float NMNI_GYRO_THRESH_DPS = 2.0f; //6DOF only: freeze gyro integration wh
 
 // Main IMU (MPU6050) calibration parameters - calibrate using calculate_IMU_error_main() in void setup()
 // These are used for the primary flight control IMU
-float AccErrorX_main = 0.11;
-float AccErrorY_main = 0.00;
+float AccErrorX_main = 0.10;
+float AccErrorY_main = -0.01;
 float AccErrorZ_main = 0.00;
-float GyroErrorX_main = -3.82;
-float GyroErrorY_main = -2.47;
-float GyroErrorZ_main = 0.99;
+float GyroErrorX_main = -3.83;
+float GyroErrorY_main = -2.48;
+float GyroErrorZ_main = 0.41;
 
 // Monitor IMU (MPU9250/ICM20948) calibration parameters - calibrate using calculate_IMU_error_monitor() in void setup()
 // These are used for the independent validation/monitor IMU
@@ -242,13 +242,13 @@ float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~7
 float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode
 float maxYaw = 160.0;     //Max yaw rate in deg/sec
 
-float Kp_roll_angle = 0.26;    //Roll P-gain - angle mode, default = 0.2 
-float Ki_roll_angle = 0.22;    //Roll I-gain - angle mode, default = 0.3
-float Kd_roll_angle = 0.07;   //Roll D-gain - angle mode, default = 0.05 (has no effect on controlANGLE2)
+float Kp_roll_angle = 0.2;     //Roll P-gain - angle mode, default = 0.2 (previously 0.26)
+float Ki_roll_angle = 0.3;     //Roll I-gain - angle mode, default = 0.3 (previously 0.22)
+float Kd_roll_angle = 0.05;    //Roll D-gain - angle mode, default = 0.05 (previously 0.07)
 float B_loop_roll = 0.9;      //Roll damping term for controlANGLE2(), lower is more damping (must be between 0 to 1), default = 0.9
-float Kp_pitch_angle = 0.26;   //Pitch P-gain - angle mode, default = 0.2
-float Ki_pitch_angle = 0.22;   //Pitch I-gain - angle mode, default = 0.3
-float Kd_pitch_angle = 0.07;  //Pitch D-gain - angle mode, default = 0.05 (has no effect on controlANGLE2)
+float Kp_pitch_angle = 0.2;    //Pitch P-gain - angle mode, default = 0.2 (previously 0.26)
+float Ki_pitch_angle = 0.3;    //Pitch I-gain - angle mode, default = 0.3 (previously 0.22)
+float Kd_pitch_angle = 0.05;   //Pitch D-gain - angle mode, default = 0.05 (previously 0.07)
 float B_loop_pitch = 0.9;     //Pitch damping term for controlANGLE2(), lower is more damping (must be between 0 to 1), default = 0.9
 
 float Kp_roll_rate = 0.15;    //Roll P-gain - rate mode, default = 0.15
@@ -356,9 +356,9 @@ float ROLL_TRIM_DEG = 0.0f;
 float PITCH_TRIM_DEG = 0.0f;  // static only — liftoff nose-up needs ATT_AUTH_* below, not large trim values
 // Fade roll/pitch PID in with throttle — limits false Madgwick tilt during ground spool / liftoff.
 const float ATT_AUTH_THR_START = 0.05f;  // no attitude authority below this thro_des
-const float ATT_AUTH_THR_FULL  = 0.38f;  // full authority at/above this thro_des (raise if nose-up before hover)
-const float PITCH_PID_MAX_LOW_THR = 0.025f; // cap |pitch_PID| while thro_des < ATT_AUTH_THR_FULL
-const float ROLL_PID_MAX_LOW_THR  = 0.025f; // cap |roll_PID|  while thro_des < ATT_AUTH_THR_FULL
+const float ATT_AUTH_THR_FULL  = 0.48f;  // full authority at/above this thro_des (raise if nose-up before hover)
+const float PITCH_PID_MAX_LOW_THR = 0.20f; // cap |pitch_PID| near ground only (thro_des < ATT_AUTH_THR_START)
+const float ROLL_PID_MAX_LOW_THR  = 0.20f; // cap |roll_PID|  near ground only (thro_des < ATT_AUTH_THR_START)
 float q0 = 1.0f; //Initialize quaternion for madgwick filter
 float q1 = 0.0f;
 float q2 = 0.0f;
@@ -475,7 +475,7 @@ void setup() {
 // if you think you've messed up and FlexPWM might be the cause, here is the fallback measure to disable every FlexPWM pin.
 // since FlexPWM are firmware level latch that can't be revert back by simply power cycle or reboot.
 // so, just compile this together with the whole sketch once, after that you can comment it again after compiled
-// and recompile the sketch withot it.
+// and recompile the sketch without it.
 
 // // Place this at the VERY TOP of setup(), before Serial.begin()
 // // and before any pinMode() calls.
@@ -695,6 +695,30 @@ void setup() {
   channel_5_pwm = channel_5_fs;
   channel_6_pwm = channel_6_fs;
 
+  // calibrateESCs(); //PROPS OFF. Uncomment this to calibrate your ESCs by setting throttle stick to max, powering on, and lowering throttle to zero after the beeps
+/*
+Full ESC Calibration Guide:
+
+Before starting: make sure to already disengaged the throttle cut channel from the transmitter or set it to armed position!
+
+Step 1 — In setup(), uncomment calibrateESCs():
+  calibrateESCs();
+
+Step 2 — Flash the firmware
+
+Step 3 — With ESCs powered off and props off:
+  Raise throttle stick to maximum (CH1 = 2000)
+  Power on ESCs
+  Wait for startup beeps
+  Lower throttle stick to minimum (CH1 = 1000)
+  Wait for confirmation beeps — ESCs now calibrated
+
+Step 4 — Power off ESCs
+Step 5 — Comment out calibrateESCs() again
+Step 6 — Reflash
+*/
+  //Code will not proceed past here if this function is uncommented!
+
   // ── Monitor IMU init (Wire1 — independent of main IMU) ─────────────────────
   // Soft-fail: if monitor IMU is absent/broken, monitorImuOk = false and
   // the FC continues without UDP telemetry. Does NOT halt flight operation.
@@ -775,28 +799,6 @@ void setup() {
   // servo7.write(0);
   
   delay(5);
-
-  // calibrateESCs(); //PROPS OFF. Uncomment this to calibrate your ESCs by setting throttle stick to max, powering on, and lowering throttle to zero after the beeps
-/*
-Full ESC Calibration Guide:
-
-Step 1 — In setup(), uncomment calibrateESCs():
-  calibrateESCs();
-
-Step 2 — Flash the firmware
-
-Step 3 — With ESCs powered off and props off:
-  Raise throttle stick to maximum (CH1 = 2000)
-  Power on ESCs
-  Wait for startup beeps
-  Lower throttle stick to minimum (CH1 = 1000)
-  Wait for confirmation beeps — ESCs now calibrated
-
-Step 4 — Power off ESCs
-Step 5 — Comment out calibrateESCs() again
-Step 6 — Reflash
-*/
-  //Code will not proceed past here if this function is uncommented!
 
 #if defined USE_ONESHOT125_ESC
   //Arm OneShot125 motors
@@ -1132,33 +1134,37 @@ void controlMixer() {
    * Control Axis  | M1(FL,CW) | M2(FR,CCW) | M3(BR,CW) | M4(BL,CCW) | Effect
    * ==============|===========|============|===========|============|=============
    *Throttle (+)   |     +     |     +      |     +     |     +      | Total thrust up
-   *Pitch (+)      |     -     |     -      |     +     |     +      | Nose up
-   *Pitch (-)      |     +     |     +      |     -     |     -      | Nose down
+   *Pitch (+)      |     -     |     -      |     +     |     +      | Nose down
+   *Pitch (-)      |     +     |     +      |     -     |     -      | Nose up
    *Roll (+)       |     +     |     -      |     -     |     +      | Roll right
    *Roll (-)       |     -     |     +      |     +     |     -      | Roll left
-   *Yaw (+)        |     -     |     +      |     -     |     +      | Yaw right (CW)
-   *Yaw (-)        |     +     |     -      |     +     |     -      | Yaw left (CCW)
+   *Yaw (+)        |     +     |     -      |     +     |     -      | Yaw left (CCW)
+   *Yaw (-)        |     -     |     +      |     -     |     +      | Yaw right (CW)
    */
-
-  // FIX: Only mix PID outputs when armed to prevent motor noise at idle/disarmed
-  if (armedFly) {
-    m1_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Front Left (CW)
-    m2_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Front Right (CCW)
-    m3_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Back Right (CW)
-    m4_command_scaled = thro_des + pitch_PID + roll_PID + yaw_PID; //Back Left (CCW)
-  } else {
-    // When disarmed, only use throttle (which will be cut by throttleCut anyway)
-    m1_command_scaled = thro_des;
-    m2_command_scaled = thro_des;
-    m3_command_scaled = thro_des;
-    m4_command_scaled = thro_des;
-  }
 
   // ========================================
   // DYNAMIC MIXER (AIR MODE)
-  // Prevents motors from stopping during extreme PID corrections at low throttle
+  // Below ATT_AUTH_THR_START: uniform throttle only (no PID mix).
+  //   Prevents unscaled yaw_PID bias from splitting motor pairs during spool-up.
+  // Above ATT_AUTH_THR_START: full PID mix.
+  // Both phases enforce the MOTOR_IDLE floor so motors spin when armed.
   // ========================================
-  if (armedFly && thro_des > 0.05f) {
+  if (armedFly) {
+    if (thro_des < ATT_AUTH_THR_START) {
+      // Ground phase — uniform throttle, zero PID contribution
+      m1_command_scaled = thro_des;
+      m2_command_scaled = thro_des;
+      m3_command_scaled = thro_des;
+      m4_command_scaled = thro_des;
+    } else {
+      // Flight phase — full PID mix
+      m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front Left (CW)
+      m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front Right (CCW)
+      m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right (CW)
+      m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left (CCW)
+    }
+    
+    // Apply Air-Mode Idle Floor (keeps motors spinning and prevents stalls)
     const float MOTOR_IDLE = 0.07f;
     float min_motor = min(min(m1_command_scaled, m2_command_scaled),
                           min(m3_command_scaled, m4_command_scaled));
@@ -1173,7 +1179,12 @@ void controlMixer() {
     m2_command_scaled = constrain(m2_command_scaled, MOTOR_IDLE, 1.0f);
     m3_command_scaled = constrain(m3_command_scaled, MOTOR_IDLE, 1.0f);
     m4_command_scaled = constrain(m4_command_scaled, MOTOR_IDLE, 1.0f);
-  }
+  } else {
+    m1_command_scaled = thro_des;
+    m2_command_scaled = thro_des;
+    m3_command_scaled = thro_des;
+    m4_command_scaled = thro_des;
+}
 
   // Per-motor thrust trim (throttle share only — roll/pitch/yaw authority unchanged)
   m1_command_scaled = MOTOR_TRIM_M1 * thro_des + (m1_command_scaled - thro_des);
@@ -1883,10 +1894,18 @@ void getDesState() {
    * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec. Also creates roll_passthru, pitch_passthru, and
    * yaw_passthru variables, to be used in commanding motors/servos with direct unstabilized commands in controlMixer().
    */
+  // Apply ±5 µs deadband to roll, pitch, yaw — snap to exact center if within noise floor.
+  // Prevents transmitter stick centering imprecision (e.g. CH4=1498) from creating a small
+  // persistent _des error that winds up the I-term on the bench, causing motor differentials.
+  const int STICK_DEADBAND_US = 5;
+  unsigned long ch2_db = (abs((int)channel_2_pwm - 1500) <= STICK_DEADBAND_US) ? 1500 : channel_2_pwm;
+  unsigned long ch3_db = (abs((int)channel_3_pwm - 1500) <= STICK_DEADBAND_US) ? 1500 : channel_3_pwm;
+  unsigned long ch4_db = (abs((int)channel_4_pwm - 1500) <= STICK_DEADBAND_US) ? 1500 : channel_4_pwm;
+
   thro_des = (channel_1_pwm - 1000.0)/1000.0; //Between 0 and 1
-  roll_des = (channel_2_pwm - 1500.0)/500.0; //Between -1 and 1
-  pitch_des = (channel_3_pwm - 1500.0)/500.0; //Between -1 and 1
-  yaw_des = (channel_4_pwm - 1500.0)/500.0; //Between -1 and 1
+  roll_des = (ch2_db - 1500.0)/500.0; //Between -1 and 1
+  pitch_des = (ch3_db - 1500.0)/500.0; //Between -1 and 1
+  yaw_des = (ch4_db - 1500.0)/500.0; //Between -1 and 1
   roll_passthru = roll_des/2.0; //Between -0.5 and 0.5
   pitch_passthru = pitch_des/2.0; //Between -0.5 and 0.5
   yaw_passthru = yaw_des/2.0; //Between -0.5 and 0.5
@@ -1924,24 +1943,15 @@ void controlANGLE() {
   derivative_roll = GyroX;
   roll_PID = 0.01*(Kp_roll_angle*error_roll + Ki_roll_angle*integral_roll - Kd_roll_angle*derivative_roll); //Scaled by .01 to bring within -1 to 1 range
 
-  //Pitch — hold I until past liftoff band (reduces ground integrator from spool vibration)
+  //Pitch
   error_pitch = pitch_des - (pitch_IMU - pitch_level_offset - PITCH_TRIM_DEG);
   integral_pitch = integral_pitch_prev + error_pitch*dt;
-  if (channel_1_pwm < 1100 || !armedFly || thro_des < ATT_AUTH_THR_FULL) {
+  if (channel_1_pwm < 1050 || !armedFly) {   //Don't let integrator build if throttle is too low or disarmed
     integral_pitch = 0;
   }
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
   derivative_pitch = -GyroY;
   pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
-
-  // Limit roll/pitch authority at low throttle (vibration/prop-wash causes false nose-up → front motor spike)
-  float att_auth = constrain((thro_des - ATT_AUTH_THR_START) / (ATT_AUTH_THR_FULL - ATT_AUTH_THR_START), 0.0f, 1.0f);
-  roll_PID *= att_auth;
-  pitch_PID *= att_auth;
-  if (thro_des < ATT_AUTH_THR_FULL) {
-    pitch_PID = constrain(pitch_PID, -PITCH_PID_MAX_LOW_THR, PITCH_PID_MAX_LOW_THR);
-    roll_PID  = constrain(roll_PID,  -ROLL_PID_MAX_LOW_THR,  ROLL_PID_MAX_LOW_THR);
-  }
 
   //Yaw, stablize on rate from GyroZ
   error_yaw = yaw_des - GyroZ;
@@ -1950,8 +1960,24 @@ void controlANGLE() {
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
-  derivative_yaw = GyroZ; //(error_yaw - error_yaw_prev)/dt;
+  derivative_yaw = GyroZ;
   yaw_PID = .01*(Kp_yaw*error_yaw + Ki_yaw*integral_yaw - Kd_yaw*derivative_yaw); //Scaled by .01 to bring within -1 to 1 range
+
+  // ── Authority ramp: all three axes fade in together from ATT_AUTH_THR_START → ATT_AUTH_THR_FULL ──
+  // Smoothstep curve (3t²-2t³) replaces the old linear ramp. The smoothstep has zero derivative
+  // at both t=0 and t=1, so PID authority starts and ends its transition without any jerk.
+  // att_auth = 0 below ATT_AUTH_THR_START (ground), 1.0 at/above ATT_AUTH_THR_FULL (full flight).
+  float att_auth_t = constrain((thro_des - ATT_AUTH_THR_START) / (ATT_AUTH_THR_FULL - ATT_AUTH_THR_START), 0.0f, 1.0f);
+  float att_auth = att_auth_t * att_auth_t * (3.0f - 2.0f * att_auth_t); // smoothstep: 3t²-2t³
+  roll_PID  *= att_auth;
+  pitch_PID *= att_auth;
+  yaw_PID   *= att_auth;
+  // Hard cap strictly on ground (< ATT_AUTH_THR_START) — att_auth handles above
+  if (thro_des < ATT_AUTH_THR_START) {
+    pitch_PID = constrain(pitch_PID, -PITCH_PID_MAX_LOW_THR, PITCH_PID_MAX_LOW_THR);
+    roll_PID  = constrain(roll_PID,  -ROLL_PID_MAX_LOW_THR,  ROLL_PID_MAX_LOW_THR);
+    yaw_PID   = constrain(yaw_PID,   -ROLL_PID_MAX_LOW_THR,  ROLL_PID_MAX_LOW_THR);
+  }
 
   //Update roll variables
   integral_roll_prev = integral_roll;
